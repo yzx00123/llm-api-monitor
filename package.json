@@ -1,0 +1,28 @@
+{
+  "name": "llm-api-monitor",
+  "version": "1.0.0",
+  "description": "LLM API Real-time Monitor",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "compile": "electron-vite build && electron-vite preview"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.4.4",
+    "electron-vite": "^3.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.3",
+    "vite": "^5.4.14"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  }
+}
