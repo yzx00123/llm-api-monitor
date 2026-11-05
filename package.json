@@ -2,12 +2,14 @@
   "name": "llm-api-monitor",
   "version": "1.0.0",
   "description": "LLM API Real-time Monitor",
+  "author": "yzx00123",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "compile": "electron-vite build && electron-vite preview"
+    "compile": "electron-vite build && electron-vite preview",
+    "dist": "electron-vite build && electron-builder --win"
   },
   "dependencies": {
     "electron-store": "^8.2.0"
@@ -16,6 +18,7 @@
     "@types/node": "^22.15.21",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.4.4",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^3.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -24,5 +27,30 @@
   },
   "allowScripts": {
     "electron@33.4.11": true
+  },
+  "build": {
+    "appId": "com.yzx00123.llm-api-monitor",
+    "productName": "LLM API Monitor",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "LLM API Monitor",
+      "artifactName": "LLM-API-Monitor-Setup-${version}.${ext}"
+    }
   }
 }
