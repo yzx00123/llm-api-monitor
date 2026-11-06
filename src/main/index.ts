@@ -87,9 +87,16 @@ ipcMain.handle('monitor:getKeys', () => {
 })
 
 ipcMain.handle('monitor:setKeys', (_event, keys: Record<string, string[]>) => {
+  const prev = getApiKeys()
   setApiKeys(keys)
   for (const [pid, ks] of Object.entries(keys)) {
     monitorEngine.setKeys(pid, ks)
+  }
+  // Providers whose keys were all removed must stop polling too
+  for (const pid of Object.keys(prev)) {
+    if (!keys[pid] || keys[pid].length === 0) {
+      monitorEngine.removeKeys(pid)
+    }
   }
   return true
 })
@@ -114,16 +121,19 @@ ipcMain.handle('monitor:getCustomProviders', () => {
 
 ipcMain.handle('monitor:addCustomProvider', (_event, provider: any) => {
   const newProvider = addCustomProvider(provider)
+  monitorEngine.registerProviders([newProvider])
   return newProvider
 })
 
 ipcMain.handle('monitor:updateCustomProvider', (_event, id: string, updates: any) => {
   const updated = updateCustomProvider(id, updates)
+  monitorEngine.registerProviders([updated])
   return updated
 })
 
 ipcMain.handle('monitor:deleteCustomProvider', (_event, id: string) => {
   deleteCustomProvider(id)
+  monitorEngine.unregisterProvider(id)
   return true
 })
 
@@ -183,6 +193,9 @@ ipcMain.handle('monitor:detectKey', async (_event, key: string) => {
 })
 
 app.whenReady().then(() => {
+  // Custom providers + persisted keys must be visible to the monitor engine
+  monitorEngine.registerProviders(getCustomProviders())
+  monitorEngine.seedKeys(getApiKeys())
   createWindow()
 
   app.on('activate', () => {

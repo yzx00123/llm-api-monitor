@@ -87,7 +87,7 @@ export function updateCustomProvider(id: string, updates: Partial<Omit<CustomPro
   if (idx === -1) throw new Error('Provider not found')
   const updated = { ...providers[idx], ...updates, updatedAt: Date.now() }
   providers[idx] = updated
-  store.set('customProviders', [providers[idx]])
+  store.set('customProviders', providers)
   return updated
 }
 

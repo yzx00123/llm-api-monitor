@@ -13,6 +13,7 @@ const GROUP_LABELS: Record<string, string> = {
   international: '国际厂商',
   china: '国内厂商',
   aggregator: '聚合平台',
+  custom: '自定义',
 }
 
 export default function Dashboard({ providers, statuses, onCheckNow, monitoring }: Props) {
@@ -21,6 +22,7 @@ export default function Dashboard({ providers, statuses, onCheckNow, monitoring 
       international: [],
       china: [],
       aggregator: [],
+      custom: [],
     }
     for (const p of providers) {
       if (groups[p.category]) groups[p.category].push(p)

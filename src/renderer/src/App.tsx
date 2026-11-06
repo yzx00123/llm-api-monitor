@@ -55,8 +55,6 @@ export default function App() {
   const [interval, setIntervalMs] = useState(10000)
   const [keys, setKeys] = useState<Record<string, string[]>>({})
   const throttled = useThrottledStatus()
-  const [showDash, setShowDash] = useState(true)
-  const dashTimerRef = useRef<ReturnType<typeof setTimeout>>(null)
 
   useEffect(() => {
     Promise.all([
@@ -69,25 +67,6 @@ export default function App() {
       setIntervalMs(settings.intervalMs)
     })
   }, [])
-
-  // Only listen to status updates on the dashboard tab
-  useEffect(() => {
-    setShowDash(view === 'dashboard')
-  }, [view])
-
-  // Debounce dashboard subscribe/unsubscribe via Electron IPC channel naming
-  useEffect(() => {
-    if (view !== 'dashboard') return
-    const cleanup = window.electronAPI.onStatusUpdate((newStatuses) => {
-      throttled.setStatusesWithoutThrottle(newStatuses)
-    })
-    if (dashTimerRef.current) clearTimeout(dashTimerRef.current)
-    dashTimerRef.current = setTimeout(() => {
-      throttled.setStatuses(throttled.latest ?? {})
-      dashTimerRef.current = null
-    }, 800)
-    return () => { /* can't unsubscribe mid-useEffect without tracking */ }
-  }, [view, throttled.setStatuses])
 
   const handleIntervalChange = useCallback(async (newInterval: number) => {
     await window.electronAPI.updateSettings({ intervalMs: newInterval })

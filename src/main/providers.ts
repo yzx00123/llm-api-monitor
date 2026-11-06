@@ -6,7 +6,7 @@ export interface Provider {
   balanceUrl?: string
   models: string[]
   protocol: 'openai' | 'anthropic' | 'gemini'
-  category: 'international' | 'china' | 'aggregator'
+  category: 'international' | 'china' | 'aggregator' | 'custom'
 }
 
 export const PROVIDERS: Provider[] = [
@@ -57,15 +57,6 @@ export const PROVIDERS: Provider[] = [
     category: 'international',
   },
   {
-    id: 'cohere',
-    name: 'Cohere',
-    company: 'Cohere',
-    baseUrl: 'https://api.cohere.com/v2',
-    models: ['command-r-plus', 'command-r'],
-    protocol: 'openai',
-    category: 'international',
-  },
-  {
     id: 'together',
     name: 'Together AI',
     company: 'Together AI',
@@ -110,7 +101,7 @@ export const PROVIDERS: Provider[] = [
     company: '月之暗面',
     baseUrl: 'https://api.moonshot.cn/v1',
     balanceUrl: 'https://api.moonshot.cn/v1/users/me/balance',
-    models: ['moonshot-v1-8k', 'moonshot-v1-32k'],
+    models: ['kimi-k3', 'kimi-k2.6', 'kimi-k2.7-code'],
     protocol: 'openai',
     category: 'china',
   },
@@ -193,6 +184,15 @@ export const PROVIDERS: Provider[] = [
     company: '字节跳动',
     baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
     models: ['doubao-pro-4k'],
+    protocol: 'openai',
+    category: 'china',
+  },
+  {
+    id: 'mimo',
+    name: '小米 MiMo',
+    company: '小米',
+    baseUrl: 'https://api.xiaomimimo.com/v1',
+    models: ['mimo-v2.6-flash', 'mimo-v2.6-pro', 'mimo-v2.6-pro-ultraspeed'],
     protocol: 'openai',
     category: 'china',
   },

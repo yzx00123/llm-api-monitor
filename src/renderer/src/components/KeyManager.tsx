@@ -187,15 +187,17 @@ export default function KeyManager({ providers, keys, onKeysChange }: Props) {
 
   async function handleRemoveKey(providerId: string, keyIndex: number) {
     const newKeys = { ...keys }
-    const providerKeys = newKeys[providerId] || []
+    const providerKeys = [...(newKeys[providerId] || [])]
     providerKeys.splice(keyIndex, 1)
     if (providerKeys.length === 0) {
       delete newKeys[providerId]
     } else {
       newKeys[providerId] = providerKeys
     }
+    // Single write: setKeys persists the full map AND syncs the monitor
+    // engine (including stopping providers whose keys were all removed).
+    // Calling removeApiKey on top of this deleted a second key by index.
     await onKeysChange(newKeys)
-    await window.electronAPI.removeApiKey(providerId, keyIndex)
   }
 
   return (

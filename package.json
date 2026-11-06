@@ -1,6 +1,6 @@
 {
   "name": "llm-api-monitor",
-  "version": "1.0.0",
+  "version": "1.1.0-beta.1",
   "description": "LLM API Real-time Monitor",
   "author": "yzx00123",
   "main": "./out/main/index.js",
@@ -31,6 +31,11 @@
   "build": {
     "appId": "com.yzx00123.llm-api-monitor",
     "productName": "LLM API Monitor",
+    "compression": "maximum",
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -39,6 +44,7 @@
       "out/**",
       "package.json"
     ],
+    "afterPack": "./scripts/afterPack.js",
     "win": {
       "target": [
         "nsis"
@@ -50,7 +56,13 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "shortcutName": "LLM API Monitor",
-      "artifactName": "LLM-API-Monitor-Setup-${version}.${ext}"
+      "artifactName": "LLM-API-Monitor-Setup-${version}.${ext}",
+      "installerLanguages": [
+        "zh-CN",
+        "en-US"
+      ],
+      "language": "2052",
+      "displayLanguageSelector": false
     }
   }
 }
