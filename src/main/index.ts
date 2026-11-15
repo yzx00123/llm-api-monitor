@@ -2,11 +2,14 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { join } from 'path'
 import { PROVIDERS, detectProvider } from './providers'
 import { monitorEngine, ProviderStatus } from './monitor'
+import { openMimoLoginWindow } from './mimo'
 import {
   getApiKeys,
   setApiKeys,
   addApiKey,
   removeApiKey,
+  getKeyLabels,
+  setKeyLabel,
   getCustomProviders,
   addCustomProvider,
   updateCustomProvider,
@@ -32,6 +35,39 @@ app.commandLine.appendSwitch('disable-site-isolation-trials')
 
 let mainWindow: BrowserWindow | null = null
 
+/**
+ * Status push coalescing. updateStatus() fires once per key transition
+ * (checking → result), and every call used to serialize the whole map over
+ * IPC. Batch pushes so the renderer gets one snapshot per burst instead of
+ * one per key transition.
+ */
+let statusPushTimer: NodeJS.Timeout | null = null
+function scheduleStatusPush(): void {
+  if (statusPushTimer) return
+  statusPushTimer = setTimeout(() => {
+    statusPushTimer = null
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    const statuses = monitorEngine.getStatuses()
+    // Strip balanceInfo.raw before crossing IPC — it can hold full API
+    // response bodies and is never rendered in the UI.
+    const out: Record<string, unknown> = {}
+    for (const [k, s] of statuses) {
+      const { balanceInfo, ...rest } = s as ProviderStatus & {
+        balanceInfo?: { raw?: unknown } | null
+      }
+      out[k] =
+        balanceInfo && balanceInfo.raw !== undefined
+          ? { ...rest, balanceInfo: { ...balanceInfo, raw: undefined } }
+          : s
+    }
+    mainWindow.webContents.send('monitor:statusUpdate', out)
+  }, 120)
+}
+
+function bindStatusPush(): void {
+  monitorEngine.setOnStatusChange(() => scheduleStatusPush())
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -40,6 +76,11 @@ function createWindow() {
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
+    // Dev runs under electron.exe (its embedded icon is the Electron atom
+    // logo, which is what shows in the taskbar). Override with our .ico —
+    // Windows needs ICO for taskbar/small-size rendering. Packaged builds
+    // fall back to the exe icon that rcedit already embedded.
+    icon: app.isPackaged ? undefined : join(__dirname, 'icon.ico'),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -86,6 +127,15 @@ ipcMain.handle('monitor:getKeys', () => {
   return getApiKeys()
 })
 
+ipcMain.handle('monitor:getKeyLabels', () => {
+  return getKeyLabels()
+})
+
+ipcMain.handle('monitor:setKeyLabel', (_event, key: string, label: string) => {
+  setKeyLabel(key, label)
+  return true
+})
+
 ipcMain.handle('monitor:setKeys', (_event, keys: Record<string, string[]>) => {
   const prev = getApiKeys()
   setApiKeys(keys)
@@ -120,7 +170,12 @@ ipcMain.handle('monitor:getCustomProviders', () => {
 })
 
 ipcMain.handle('monitor:addCustomProvider', (_event, provider: any) => {
-  const newProvider = addCustomProvider(provider)
+  // Accept optional slug as 供应商标识; fall back to generated id.
+  const id =
+    typeof provider?.id === 'string' && provider.id.trim()
+      ? provider.id.trim().toLowerCase()
+      : `custom-${Date.now()}`
+  const newProvider = addCustomProvider({ ...provider, id })
   monitorEngine.registerProviders([newProvider])
   return newProvider
 })
@@ -143,6 +198,11 @@ ipcMain.handle('monitor:getSettings', () => {
 
 ipcMain.handle('monitor:updateSettings', (_event, updates: any) => {
   updateSettings(updates)
+  // Propagate interval changes to the running engine — previously only the
+  // store was updated, so changing the interval did nothing until restart.
+  if (typeof updates?.intervalMs === 'number') {
+    monitorEngine.setConfig({ intervalMs: updates.intervalMs })
+  }
   return true
 })
 
@@ -158,9 +218,7 @@ ipcMain.handle('monitor:setInterval', (_event, intervalMs: number) => {
 
 ipcMain.handle('monitor:start', (_event, providerIds: string[], intervalMs: number) => {
   monitorEngine.setConfig({ enabled: true, intervalMs })
-  monitorEngine.setOnStatusChange((statuses: Map<string, ProviderStatus>) => {
-    mainWindow?.webContents.send('monitor:statusUpdate', Object.fromEntries(statuses))
-  })
+  bindStatusPush()
   for (const id of providerIds) {
     if (monitorEngine.hasKeys(id)) {
       monitorEngine.startProvider(id)
@@ -176,8 +234,8 @@ ipcMain.handle('monitor:stop', () => {
   return true
 })
 
-ipcMain.handle('monitor:checkNow', (_event, providerId: string) => {
-  monitorEngine.checkProvider(providerId)
+ipcMain.handle('monitor:checkNow', (_event, providerId: string, keyIndex?: number) => {
+  monitorEngine.checkProvider(providerId, keyIndex)
   return true
 })
 
@@ -192,11 +250,61 @@ ipcMain.handle('monitor:detectKey', async (_event, key: string) => {
   return monitorEngine.detectKey(key)
 })
 
+ipcMain.handle('monitor:mimoConnect', async () => {
+  const ok = await openMimoLoginWindow(mainWindow)
+  if (ok) {
+    // Cookie just saved — refresh mimo balances immediately
+    await monitorEngine.forceBalanceRefresh('mimo')
+  }
+  return ok
+})
+
+ipcMain.handle(
+  'monitor:latencyTest',
+  async (
+    _event,
+    opts: { providerId: string; key: string; model?: string; text?: string; maxTokens?: number; timeoutMs?: number }
+  ) => {
+    const result = await monitorEngine.latencyTest(opts)
+    // Write the measured latency back onto the dashboard card for this key
+    monitorEngine.recordLatencyResult(opts.providerId, opts.key, result)
+    return result
+  }
+)
+
+ipcMain.handle('monitor:listModels', async (_event, providerId: string, key: string) => {
+  return monitorEngine.listModels(providerId, key)
+})
+
+ipcMain.handle('app:getVersion', () => {
+  try {
+    // electron-vite bundles from project root; package.json is one level up from out/main
+    // Prefer app.getVersion() when packaged.
+    return app.getVersion()
+  } catch {
+    return '0.0.0'
+  }
+})
+
 app.whenReady().then(() => {
   // Custom providers + persisted keys must be visible to the monitor engine
   monitorEngine.registerProviders(getCustomProviders())
   monitorEngine.seedKeys(getApiKeys())
+
+  // Status push must be live even before the user presses 开始 — the 测延迟
+  // page writes latency onto dashboard cards and those updates must arrive.
+  bindStatusPush()
+
   createWindow()
+
+  // "以后打开软件自动开启" — resume monitoring once the window exists so
+  // status pushes aren't dropped while mainWindow is still null.
+  const settings = getSettings()
+  if (settings.autoStart && Object.keys(getApiKeys()).length > 0) {
+    monitorEngine.setConfig({ enabled: true, intervalMs: settings.intervalMs })
+    bindStatusPush()
+    monitorEngine.startAll()
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

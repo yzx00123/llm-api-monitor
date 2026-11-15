@@ -4,6 +4,7 @@ import type { Provider } from '../preload'
 interface Props {
   providers: Provider[]
   keys: Record<string, string[]>
+  labels: Record<string, string>
   onKeysChange: (keys: Record<string, string[]>) => Promise<void>
 }
 
@@ -41,7 +42,7 @@ function maskKey(key: string): string {
   return `${key.slice(0, 6)}••••${key.slice(-4)}`
 }
 
-export default function KeyManager({ providers, keys, onKeysChange }: Props) {
+export default function KeyManager({ providers, keys, labels, onKeysChange }: Props) {
   const [bulkText, setBulkText] = useState('')
   const [bulkProvider, setBulkProvider] = useState('')
   const [msg, setMsg] = useState('')
@@ -75,11 +76,17 @@ export default function KeyManager({ providers, keys, onKeysChange }: Props) {
 
     setDetecting(false)
 
+    // Only count keys that are actually NEW this round — the summary used to
+    // count every loaded key, so importing 1 key next to an existing one
+    // reported "已识别 2 个密钥".
+    const added: Record<string, string[]> = {}
     for (const { providerId, key } of results) {
       if (providerId) {
         if (!newKeys[providerId]) newKeys[providerId] = []
         if (!newKeys[providerId].includes(key)) {
           newKeys[providerId].push(key)
+          if (!added[providerId]) added[providerId] = []
+          added[providerId].push(key)
         }
       } else {
         failedKeys.push(key)
@@ -88,13 +95,12 @@ export default function KeyManager({ providers, keys, onKeysChange }: Props) {
 
     await onKeysChange(newKeys)
 
-    const count = Object.values(newKeys).reduce((sum, ks) => sum + ks.length, 0)
-    const providerCount = Object.keys(newKeys).length
-    const detail = Object.entries(newKeys)
+    const count = Object.values(added).reduce((sum, ks) => sum + ks.length, 0)
+    const detail = Object.entries(added)
       .map(([pid, ks]) => `${providers.find((x) => x.id === pid)?.name ?? pid} ${ks.length} 个`)
       .join('，')
 
-    let summary = count > 0 ? `已识别 ${count} 个密钥（${detail}）` : ''
+    let summary = count > 0 ? `已识别 ${count} 个密钥（${detail}）` : '没有新增密钥（可能已存在）'
     if (failedKeys.length > 0) {
       summary += summary ? '；' : ''
       summary += `${failedKeys.length} 个未识别，请手动指定`
@@ -285,6 +291,7 @@ export default function KeyManager({ providers, keys, onKeysChange }: Props) {
                     <div className="key-chip-list">
                       {ks.map((k, i) => (
                         <span key={i} className="key-chip">
+                          {labels[k] && <b className="key-chip-label">{labels[k]}</b>}
                           {maskKey(k)}
                           <button
                             className="key-chip-remove"

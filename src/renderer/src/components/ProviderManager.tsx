@@ -4,81 +4,165 @@ import type { Provider } from '../preload'
 interface Props {
   providers: Provider[]
   onProvidersChange: (providers: Provider[]) => void
+  onBack: () => void
 }
 
 interface FormState {
+  slug: string
   name: string
-  company: string
+  note: string
+  website: string
   baseUrl: string
   balanceUrl: string
+  apiKey: string
   protocol: 'openai' | 'anthropic' | 'gemini'
-  models: string
   category: 'international' | 'china' | 'aggregator' | 'custom'
+  models: string[]
 }
 
-export default function ProviderManager({ providers, onProvidersChange }: Props) {
+const EMPTY: FormState = {
+  slug: '',
+  name: '',
+  note: '',
+  website: '',
+  baseUrl: '',
+  balanceUrl: '',
+  apiKey: '',
+  protocol: 'openai',
+  category: 'custom',
+  models: [],
+}
+
+const PROTOCOL_LABEL: Record<string, string> = {
+  openai: 'OpenAI Completions',
+  anthropic: 'Anthropic Messages',
+  gemini: 'Gemini generateContent',
+}
+
+export default function ProviderManager({ providers, onProvidersChange, onBack }: Props) {
+  const [mode, setMode] = useState<'list' | 'form'>('list')
   const [editingId, setEditingId] = useState<string | null>(null)
-  const [showAddModal, setShowAddModal] = useState(false)
-  const [formData, setFormData] = useState<FormState>({
-    name: '',
-    company: '',
-    baseUrl: '',
-    balanceUrl: '',
-    protocol: 'openai',
-    models: '',
-    category: 'custom',
-  })
+  const [form, setForm] = useState<FormState>(EMPTY)
+  const [modelDraft, setModelDraft] = useState('')
   const [msg, setMsg] = useState('')
+  const [busy, setBusy] = useState(false)
 
   const customProviders = providers.filter((p) => p.category === 'custom')
   const builtInProviders = providers.filter((p) => p.category !== 'custom')
 
-  const resetForm = useCallback(() => {
-    setFormData({
-      name: '',
-      company: '',
-      baseUrl: '',
-      balanceUrl: '',
-      protocol: 'openai',
-      models: '',
-      category: 'custom',
-    })
+  const flash = useCallback((m: string) => {
+    setMsg(m)
+    setTimeout(() => setMsg(''), 3500)
+  }, [])
+
+  const openCreate = useCallback(() => {
+    setForm(EMPTY)
     setEditingId(null)
-    setShowAddModal(false)
+    setModelDraft('')
+    setMode('form')
+  }, [])
+
+  const openEdit = useCallback((p: Provider) => {
+    setForm({
+      slug: p.id.startsWith('custom-') ? '' : p.id,
+      name: p.name,
+      note: p.note ?? p.company ?? '',
+      website: p.website ?? '',
+      baseUrl: p.baseUrl,
+      balanceUrl: p.balanceUrl ?? '',
+      apiKey: '',
+      protocol: (p.protocol as FormState['protocol']) ?? 'openai',
+      category: (p.category as FormState['category']) ?? 'custom',
+      models: [...(p.models ?? [])],
+    })
+    setEditingId(p.id)
+    setModelDraft('')
+    setMode('form')
+  }, [])
+
+  const cancelForm = useCallback(() => {
+    setMode('list')
+    setEditingId(null)
+    setForm(EMPTY)
+    setMsg('')
+  }, [])
+
+  const configJson = JSON.stringify(
+    {
+      baseUrl: form.baseUrl,
+      apiKey: form.apiKey ? '••••' : '',
+      api: form.protocol === 'openai' ? 'openai-completions' : form.protocol,
+      models: form.models,
+    },
+    null,
+    2
+  )
+
+  const addModel = useCallback(() => {
+    const m = modelDraft.trim()
+    if (!m) return
+    setForm((f) => (f.models.includes(m) ? f : { ...f, models: [...f.models, m] }))
+    setModelDraft('')
+  }, [modelDraft])
+
+  const removeModel = useCallback((m: string) => {
+    setForm((f) => ({ ...f, models: f.models.filter((x) => x !== m) }))
   }, [])
 
   const handleSave = useCallback(async () => {
-    if (!formData.name || !formData.baseUrl) {
-      setMsg('请填写名称和接口地址')
-      setTimeout(() => setMsg(''), 3000)
+    if (!form.name.trim() || !form.baseUrl.trim()) {
+      flash('请填写名称和 API 端点')
+      return
+    }
+    const rawSlug = form.slug.trim().toLowerCase()
+    const slug = rawSlug
+      ? rawSlug.replace(/[^a-z0-9-_]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+      : `custom-${Date.now()}`
+    if (rawSlug && !/^[a-z0-9][a-z0-9-_]*$/.test(slug)) {
+      flash('供应商标识只能包含小写字母、数字和连字符')
+      return
+    }
+    if (!editingId && providers.some((p) => p.id === slug)) {
+      flash('该供应商标识已存在')
       return
     }
 
+    setBusy(true)
     try {
-      if (editingId) {
-        await window.electronAPI.updateCustomProvider(editingId, {
-          ...formData,
-          models: formData.models.split(',').map((m) => m.trim()).filter((m) => m),
-        })
-      } else {
-        await window.electronAPI.addCustomProvider({
-          ...formData,
-          id: `custom-${Date.now()}`,
-          models: formData.models.split(',').map((m) => m.trim()).filter((m) => m),
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        })
+      const payload = {
+        id: editingId ?? slug,
+        name: form.name.trim(),
+        company: form.note.trim(),
+        note: form.note.trim(),
+        website: form.website.trim(),
+        baseUrl: form.baseUrl.trim().replace(/\/+$/, ''),
+        balanceUrl: form.balanceUrl.trim() || undefined,
+        protocol: form.protocol,
+        category: editingId ? form.category : 'custom',
+        models: form.models,
       }
+
+      if (editingId) {
+        await window.electronAPI.updateCustomProvider(editingId, payload)
+      } else {
+        await window.electronAPI.addCustomProvider(payload)
+        if (form.apiKey.trim()) {
+          await window.electronAPI.addApiKey(payload.id, [form.apiKey.trim()])
+        }
+      }
+
       const all = await window.electronAPI.getProviders()
       onProvidersChange(all)
-      resetForm()
-      setMsg(editingId ? '已更新供应商' : '已添加供应商')
-      setTimeout(() => setMsg(''), 2000)
+      flash(editingId ? '已更新供应商' : '已添加供应商')
+      setMode('list')
+      setEditingId(null)
+      setForm(EMPTY)
     } catch (err) {
-      setMsg('操作失败：' + (err instanceof Error ? err.message : String(err)))
-      setTimeout(() => setMsg(''), 3000)
+      flash('操作失败：' + (err instanceof Error ? err.message : String(err)))
+    } finally {
+      setBusy(false)
     }
-  }, [formData, editingId, resetForm, onProvidersChange])
+  }, [form, editingId, providers, flash, onProvidersChange])
 
   const handleDelete = useCallback(
     async (id: string) => {
@@ -87,37 +171,238 @@ export default function ProviderManager({ providers, onProvidersChange }: Props)
         await window.electronAPI.deleteCustomProvider(id)
         const all = await window.electronAPI.getProviders()
         onProvidersChange(all)
-        setMsg('已删除供应商')
-        setTimeout(() => setMsg(''), 2000)
+        flash('已删除供应商')
       } catch (err) {
-        setMsg('删除失败：' + (err instanceof Error ? err.message : String(err)))
+        flash('删除失败：' + (err instanceof Error ? err.message : String(err)))
       }
     },
-    [onProvidersChange]
+    [flash, onProvidersChange]
   )
 
-  const handleEdit = useCallback((provider: Provider) => {
-    setFormData({
-      name: provider.name,
-      company: provider.company,
-      baseUrl: provider.baseUrl,
-      balanceUrl: provider.balanceUrl ?? '',
-      protocol: provider.protocol as any,
-      models: provider.models.join(', '),
-      category: provider.category as any,
-    })
-    setEditingId(provider.id)
-    setShowAddModal(true)
-  }, [])
+  // ── Full-page form (CC Switch style) ──────────────────────────
+  if (mode === 'form') {
+    return (
+      <div className="provider-form-page">
+        <header className="page-top">
+          <button className="page-back" onClick={cancelForm}>
+            ← 返回
+          </button>
+          <div className="page-top-title">
+            <h2>{editingId ? '编辑供应商' : '添加供应商'}</h2>
+            <p>自定义配置 · 手动填写所有字段</p>
+          </div>
+        </header>
 
+        <div className="provider-form card">
+          <div className="pf-banner">
+            <span className="pf-banner-icon">☰</span>
+            <span>自定义配置 · 手动填写所有字段</span>
+            <span className="pf-banner-tag">{editingId ? '编辑中' : '新建'}</span>
+          </div>
+
+          <div className="form-grid">
+            <div className="form-group form-group-full">
+              <label>
+                供应商标识 <em>*</em>
+              </label>
+              <input
+                className="form-input"
+                value={form.slug}
+                onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value }))}
+                placeholder="my-provider"
+                disabled={!!editingId}
+                autoComplete="off"
+              />
+              <div className="pf-help">配置文件中的唯一标识符，只能使用小写字母、数字和连字符</div>
+            </div>
+
+            <div className="form-group">
+              <label>
+                名称 <em>*</em>
+              </label>
+              <input
+                className="form-input"
+                value={form.name}
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder="例如：Claude 官方"
+              />
+            </div>
+
+            <div className="form-group">
+              <label>备注</label>
+              <input
+                className="form-input"
+                value={form.note}
+                onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))}
+                placeholder="例如：公司专用账号"
+              />
+            </div>
+
+            <div className="form-group form-group-full">
+              <label>官网链接</label>
+              <input
+                className="form-input"
+                value={form.website}
+                onChange={(e) => setForm((f) => ({ ...f, website: e.target.value }))}
+                placeholder="https://example.com（可选）"
+              />
+            </div>
+
+            <div className="form-group form-group-full">
+              <label>API 协议</label>
+              <select
+                className="form-select"
+                value={form.protocol}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, protocol: e.target.value as FormState['protocol'] }))
+                }
+              >
+                <option value="openai">{PROTOCOL_LABEL.openai}</option>
+                <option value="anthropic">{PROTOCOL_LABEL.anthropic}</option>
+                <option value="gemini">{PROTOCOL_LABEL.gemini}</option>
+              </select>
+              <div className="pf-help">选择与供应商 API 兼容的协议类型。大多数供应商使用 OpenAI Completions 格式。</div>
+            </div>
+
+            <div className="form-group form-group-full">
+              <label>
+                API 端点 <em>*</em>
+              </label>
+              <input
+                className="form-input"
+                value={form.baseUrl}
+                onChange={(e) => setForm((f) => ({ ...f, baseUrl: e.target.value }))}
+                placeholder="https://api.example.com/v1"
+              />
+            </div>
+
+            <div className="form-group form-group-full">
+              <label>余额查询地址</label>
+              <input
+                className="form-input"
+                value={form.balanceUrl}
+                onChange={(e) => setForm((f) => ({ ...f, balanceUrl: e.target.value }))}
+                placeholder="https://api.example.com/balance（可选）"
+              />
+            </div>
+
+            <div className="form-group form-group-full">
+              <label>API Key</label>
+              <input
+                className="form-input"
+                type="password"
+                value={form.apiKey}
+                onChange={(e) => setForm((f) => ({ ...f, apiKey: e.target.value }))}
+                placeholder="只需要填这里，保存后会自动加入密钥列表"
+                autoComplete="off"
+              />
+            </div>
+
+            <div className="form-group">
+              <label>类别</label>
+              <select
+                className="form-select"
+                value={form.category}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, category: e.target.value as FormState['category'] }))
+                }
+              >
+                <option value="custom">自定义</option>
+                <option value="international">国际厂商</option>
+                <option value="china">国内厂商</option>
+                <option value="aggregator">聚合平台</option>
+              </select>
+            </div>
+
+            <div className="form-group form-group-full">
+              <label>模型配置</label>
+              <div className="pf-models">
+                <div className="pf-models-actions">
+                  <button type="button" className="btn-secondary set-chip" onClick={addModel}>
+                    + 添加模型
+                  </button>
+                </div>
+                {form.models.length === 0 ? (
+                  <div className="pf-models-empty">暂无模型配置</div>
+                ) : (
+                  <div className="pf-model-tags">
+                    {form.models.map((m) => (
+                      <span key={m} className="pf-model-tag">
+                        {m}
+                        <button type="button" onClick={() => removeModel(m)} title="移除">
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="pf-model-add-row">
+                  <input
+                    className="form-input"
+                    value={modelDraft}
+                    onChange={(e) => setModelDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        addModel()
+                      }
+                    }}
+                    placeholder="model-id，回车添加"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="form-group form-group-full">
+              <label>配置 JSON</label>
+              <pre className="pf-json">{configJson}</pre>
+            </div>
+          </div>
+
+          {msg && (
+            <div className={msg.includes('失败') ? 'error-msg' : 'success-msg'}>{msg}</div>
+          )}
+
+          <div className="provider-form-footer">
+            <button className="btn-secondary" onClick={cancelForm}>
+              取消
+            </button>
+            <button
+              className="btn btn-start"
+              onClick={() => void handleSave()}
+              disabled={busy || !form.name.trim() || !form.baseUrl.trim()}
+            >
+              {busy ? '保存中…' : editingId ? '保存' : '添加'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── List ──────────────────────────────────────────────────────
   return (
     <div className="provider-manager">
-      <div className="pm-header">
-        <h2>供应商管理</h2>
-        <button className="btn btn-start" onClick={() => setShowAddModal(true)}>
-          + 添加供应商
+      <header className="page-top">
+        <button className="page-back" onClick={onBack}>
+          ← 返回
         </button>
-      </div>
+        <div className="page-top-title">
+          <h2>供应商</h2>
+          <p>内置 {builtInProviders.length} 家 · 自定义 {customProviders.length} 家</p>
+        </div>
+        <div className="page-top-actions">
+          <button className="btn btn-start" onClick={openCreate}>
+            + 添加供应商
+          </button>
+        </div>
+      </header>
+
+      {msg && (
+        <div className={msg.includes('失败') ? 'error-msg' : 'success-msg'} style={{ marginBottom: 14 }}>
+          {msg}
+        </div>
+      )}
 
       <div className="pm-section">
         <h3>内置供应商 ({builtInProviders.length})</h3>
@@ -126,7 +411,15 @@ export default function ProviderManager({ providers, onProvidersChange }: Props)
             <div key={p.id} className="card card-provider builtin">
               <div className="card-provider-head">
                 <span className="card-provider-name">{p.name}</span>
-                <span className={`status-dot ${p.category === 'international' ? 'blue' : p.category === 'china' ? 'green' : 'purple'}`} />
+                <span
+                  className={`status-dot ${
+                    p.category === 'international'
+                      ? 'blue'
+                      : p.category === 'china'
+                        ? 'green'
+                        : 'purple'
+                  }`}
+                />
               </div>
               <div className="card-provider-body">
                 <div className="field">
@@ -146,9 +439,12 @@ export default function ProviderManager({ providers, onProvidersChange }: Props)
       <div className="pm-section">
         <h3>自定义供应商 ({customProviders.length})</h3>
         {customProviders.length === 0 ? (
-          <p style={{ color: 'var(--text-muted)', fontSize: 13, padding: '40px 0' }}>
-            尚无自定义供应商。点击右上角按钮添加。
-          </p>
+          <div className="pm-empty">
+            <p>尚无自定义供应商</p>
+            <button className="btn btn-start" onClick={openCreate}>
+              + 添加供应商
+            </button>
+          </div>
         ) : (
           <div className="grid grid-providers">
             {customProviders.map((p) => (
@@ -156,23 +452,35 @@ export default function ProviderManager({ providers, onProvidersChange }: Props)
                 <div className="card-provider-head">
                   <span className="card-provider-name">{p.name}</span>
                   <div className="card-provider-actions">
-                    <button className="btn-icon" onClick={() => handleEdit(p)} title="编辑">✎</button>
-                    <button className="btn-icon btn-danger" onClick={() => handleDelete(p.id)} title="删除">×</button>
+                    <button className="btn-icon" onClick={() => openEdit(p)} title="编辑">
+                      ✎
+                    </button>
+                    <button
+                      className="btn-icon btn-danger"
+                      onClick={() => void handleDelete(p.id)}
+                      title="删除"
+                    >
+                      ×
+                    </button>
                   </div>
                 </div>
                 <div className="card-provider-body">
                   <div className="field">
-                    <label>公司</label>
-                    <span>{p.company || '—'}</span>
+                    <label>标识</label>
+                    <span className="mono">{p.id}</span>
                   </div>
                   <div className="field">
                     <label>协议</label>
                     <span>{p.protocol}</span>
                   </div>
-                  {p.balanceUrl && (
+                  <div className="field field-full">
+                    <label>端点</label>
+                    <span className="mono ellipsis">{p.baseUrl}</span>
+                  </div>
+                  {p.note && (
                     <div className="field field-full">
-                      <label>余额地址</label>
-                      <span>{p.balanceUrl}</span>
+                      <label>备注</label>
+                      <span>{p.note}</span>
                     </div>
                   )}
                 </div>
@@ -181,101 +489,6 @@ export default function ProviderManager({ providers, onProvidersChange }: Props)
           </div>
         )}
       </div>
-
-      {showAddModal && (
-        <div className="modal-overlay">
-          <div className="modal modal-large">
-            <div className="modal-header">
-              <h3>{editingId ? '编辑供应商' : '添加供应商'}</h3>
-              <button className="modal-close" onClick={resetForm}>×</button>
-            </div>
-            <div className="modal-body">
-              <div className="form-grid">
-                <div className="form-group">
-                  <label>名称 *</label>
-                  <input
-                    className="form-input"
-                    value={formData.name}
-                    onChange={(e) => setFormData((f) => ({ ...f, name: e.target.value }))}
-                    placeholder="如：MyPrivateLLM"
-                  />
-                </div>
-                <div className="form-group">
-                  <label>公司</label>
-                  <input
-                    className="form-input"
-                    value={formData.company}
-                    onChange={(e) => setFormData((f) => ({ ...f, company: e.target.value }))}
-                    placeholder="如：私有部署"
-                  />
-                </div>
-                <div className="form-group form-group-full">
-                  <label>接口地址 *</label>
-                  <input
-                    className="form-input"
-                    value={formData.baseUrl}
-                    onChange={(e) => setFormData((f) => ({ ...f, baseUrl: e.target.value }))}
-                    placeholder="https://api.example.com"
-                  />
-                </div>
-                <div className="form-group">
-                  <label>协议类型</label>
-                  <select
-                    className="form-select"
-                    value={formData.protocol}
-                    onChange={(e) => setFormData((f) => ({ ...f, protocol: e.target.value as any }))}
-                  >
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="gemini">Gemini</option>
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label>类别</label>
-                  <select
-                    className="form-select"
-                    value={formData.category}
-                    onChange={(e) => setFormData((f) => ({ ...f, category: e.target.value as any }))}
-                  >
-                    <option value="international">国际厂商</option>
-                    <option value="china">国内厂商</option>
-                    <option value="aggregator">聚合平台</option>
-                    <option value="custom">自定义</option>
-                  </select>
-                </div>
-                <div className="form-group form-group-full">
-                  <label>余额查询地址（可选）</label>
-                  <input
-                    className="form-input"
-                    value={formData.balanceUrl}
-                    onChange={(e) => setFormData((f) => ({ ...f, balanceUrl: e.target.value }))}
-                    placeholder="https://api.example.com/balance"
-                  />
-                </div>
-                <div className="form-group form-group-full">
-                  <label>默认模型列表（逗号分隔）</label>
-                  <textarea
-                    className="form-textarea"
-                    value={formData.models}
-                    onChange={(e) => setFormData((f) => ({ ...f, models: e.target.value }))}
-                    placeholder="model-1, model-2, model-3"
-                    rows={3}
-                  />
-                </div>
-              </div>
-              {msg && (
-                <div className={msg.includes('失败') ? 'error-msg' : 'success-msg'}>
-                  {msg}
-                </div>
-              )}
-            </div>
-            <div className="modal-footer">
-              <button className="btn-secondary" onClick={resetForm}>取消</button>
-              <button className="btn btn-start" onClick={handleSave}>{editingId ? '保存修改' : '添加'}</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

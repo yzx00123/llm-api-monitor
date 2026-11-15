@@ -8,7 +8,7 @@
 
 - **实时监测**：按可配置间隔（5/10/30/60 秒）轮询各厂商 API，发送最小请求（max_tokens=5）测量真实往返延迟
 - **多协议支持**：OpenAI 兼容协议、Anthropic Messages API、Google Gemini API
-- **内置 20 家厂商**：OpenAI / Claude / Gemini / DeepSeek / Kimi (月之暗面) / 通义千问 / 智谱 GLM / 百川 / MiniMax / 零一万物 / SiliconFlow / 讯飞星火 / 阶跃星辰 / 豆包 (火山引擎) / Groq / Mistral / Cohere / Together / Perplexity / OpenRouter
+- **内置 21 家厂商**：OpenAI / Claude / Gemini / Groq / xAI (Grok) / DeepSeek / Kimi (月之暗面) / 通义千问 / 智谱 GLM / 百川 / MiniMax / 零一万物 / SiliconFlow / 讯飞星火 / 阶跃星辰 / 豆包 (火山引擎) / Mistral / Together / Perplexity / OpenRouter / 小米 MiMo
 - **自定义供应商**：支持添加任意兼容接口（名称 / 地址 / 协议 / 余额接口 / 模型列表）
 - **密钥智能识别**：批量粘贴或文件导入（JSON/CSV），密钥自动实测归属厂商；无法识别时弹窗手动分配
 - **余额查询**：DeepSeek、Kimi（按官方文档对接）、SiliconFlow 等支持余额接口的厂商

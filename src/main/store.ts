@@ -2,10 +2,31 @@ import Store from 'electron-store'
 
 interface StoreSchema {
   apiKeys: Record<string, string[]>
+  /** Full key -> custom display name (e.g. "公司号"). Survives reordering. */
+  keyLabels: Record<string, string>
+  /** MiMo console session cookie (api-platform_serviceToken=...; userId=...). */
+  mimoCookie: string
   customProviders: CustomProvider[]
   settings: {
     intervalMs: number
     enabled: boolean
+    /** Auto-start monitoring when the app opens. */
+    autoStart: boolean
+    /** One-time onboarding dialog has been dismissed. */
+    onboarded: boolean
+    /** UI theme: light, dark, or follow the OS. */
+    theme: 'light' | 'dark' | 'system'
+    /** Probe text sent on every latency check (and by 测延迟). */
+    probeText: string
+    /** max_tokens for latency probes. Small keeps the check cheap. */
+    probeMaxTokens: number
+    /**
+     * Optional model override for latency probes.
+     * Empty = use the provider's default probe model (models[0]).
+     * Note: a single override may not exist on every provider — leave empty
+     * unless you only monitor one vendor.
+     */
+    probeModel: string
   }
 }
 
@@ -18,6 +39,10 @@ interface CustomProvider {
   models: string[]
   protocol: 'openai' | 'anthropic' | 'gemini'
   category: 'international' | 'china' | 'aggregator' | 'custom'
+  /** Optional homepage / docs link shown in the provider form. */
+  website?: string
+  /** Optional free-form note (公司专用账号 etc). */
+  note?: string
   createdAt: number
   updatedAt: number
 }
@@ -26,10 +51,15 @@ const store = new Store<StoreSchema>({
   name: 'llm-monitor-config',
   defaults: {
     apiKeys: {},
+    keyLabels: {},
+    mimoCookie: '',
     customProviders: [],
     settings: {
       intervalMs: 10000,
       enabled: false,
+      autoStart: true,
+      onboarded: false,
+      theme: 'system',
     },
   },
 })
@@ -40,6 +70,25 @@ export function getApiKeys(): Record<string, string[]> {
 
 export function setApiKeys(keys: Record<string, string[]>): void {
   store.set('apiKeys', keys)
+}
+
+export function getKeyLabels(): Record<string, string> {
+  return store.get('keyLabels', {})
+}
+
+export function setKeyLabel(key: string, label: string): void {
+  const labels = store.get('keyLabels', {})
+  if (label.trim()) labels[key] = label.trim()
+  else delete labels[key]
+  store.set('keyLabels', labels)
+}
+
+export function getMimoCookie(): string {
+  return store.get('mimoCookie', '')
+}
+
+export function setMimoCookie(cookie: string): void {
+  store.set('mimoCookie', cookie)
 }
 
 export function addApiKey(providerId: string, keys: string[]): void {
@@ -100,11 +149,38 @@ export function deleteCustomProvider(id: string): void {
   store.set('apiKeys', keys)
 }
 
-export function getSettings(): { intervalMs: number; enabled: boolean } {
-  return store.get('settings', { intervalMs: 10000, enabled: false })
+export type AppSettings = {
+  intervalMs: number
+  enabled: boolean
+  autoStart: boolean
+  onboarded: boolean
+  theme: 'light' | 'dark' | 'system'
+  /** Probe text sent on every latency check (and by 测延迟). */
+  probeText: string
+  /** max_tokens for latency probes. Small keeps the check cheap. */
+  probeMaxTokens: number
+  /** Optional model override; empty = provider default (models[0]). */
+  probeModel: string
 }
 
-export function updateSettings(updates: Partial<{ intervalMs: number; enabled: boolean }>): void {
-  const current = store.get('settings', { intervalMs: 10000, enabled: false })
+const SETTINGS_DEFAULTS: AppSettings = {
+  intervalMs: 10000,
+  enabled: false,
+  autoStart: true,
+  onboarded: false,
+  theme: 'system',
+  probeText: '请用一句话介绍你自己。',
+  // Small on purpose: probes measure latency, not generation quality.
+  // 16 tokens is enough for a first reply and keeps every check cheap.
+  probeMaxTokens: 16,
+  probeModel: '',
+}
+
+export function getSettings(): AppSettings {
+  return store.get('settings', SETTINGS_DEFAULTS)
+}
+
+export function updateSettings(updates: Partial<AppSettings>): void {
+  const current = store.get('settings', SETTINGS_DEFAULTS)
   store.set('settings', { ...current, ...updates })
 }
