@@ -100,6 +100,8 @@ function Segmented<T extends string>({
   )
 }
 
+const INTERVAL_PRESETS = [5000, 10000, 30000, 60000, 300000, 1800000]
+
 export default function Settings({
   theme,
   onThemeChange,
@@ -126,6 +128,10 @@ export default function Settings({
     alertOnRecovery: true,
     minimizeToTray: true,
   })
+  const [customPick, setCustomPick] = useState(false)
+  const [customSec, setCustomSec] = useState(10)
+  const isPreset = INTERVAL_PRESETS.includes(intervalMs)
+  const showCustom = customPick || !isPreset
 
   useEffect(() => {
     window.electronAPI.getVersion().then(setVersion).catch(() => setVersion(''))
@@ -278,17 +284,58 @@ export default function Settings({
             <>
               <h2 className="settings-section-title">轮询</h2>
               <div className="settings-card">
-                <Row label="检测间隔" hint="所有密钥按此间隔自动探测">
-                  <select
-                    className="interval-select"
-                    value={intervalMs}
-                    onChange={(e) => onIntervalChange(Number(e.target.value))}
-                  >
-                    <option value={5000}>5 秒</option>
-                    <option value={10000}>10 秒</option>
-                    <option value={30000}>30 秒</option>
-                    <option value={60000}>60 秒</option>
-                  </select>
+                <Row
+                  label="检测间隔"
+                  hint="所有密钥按此间隔自动探测；按 token 计费的厂商（如月之暗面）建议 5 分钟以上更省"
+                >
+                  <div className="interval-custom">
+                    <select
+                      className="interval-select"
+                      value={showCustom ? -1 : intervalMs}
+                      onChange={(e) => {
+                        const v = Number(e.target.value)
+                        if (v === -1) {
+                          setCustomPick(true)
+                          setCustomSec(Math.max(1, Math.round(intervalMs / 1000)))
+                          return
+                        }
+                        setCustomPick(false)
+                        onIntervalChange(v)
+                      }}
+                    >
+                      <option value={5000}>5 秒</option>
+                      <option value={10000}>10 秒</option>
+                      <option value={30000}>30 秒</option>
+                      <option value={60000}>60 秒</option>
+                      <option value={300000}>5 分钟</option>
+                      <option value={1800000}>30 分钟</option>
+                      <option value={-1}>自定义…</option>
+                    </select>
+                    {showCustom && (
+                      <>
+                        <input
+                          className="form-input interval-custom-input"
+                          type="number"
+                          min={1}
+                          max={86400}
+                          value={customPick ? (customSec === 0 ? '' : customSec) : Math.round(intervalMs / 1000)}
+                          onChange={(e) => {
+                            const raw = e.target.value
+                            if (raw === '') {
+                              setCustomPick(true)
+                              setCustomSec(0)
+                              return
+                            }
+                            const sec = Math.round(Number(raw))
+                            setCustomPick(true)
+                            setCustomSec(sec)
+                            if (sec >= 1 && sec <= 86400) onIntervalChange(sec * 1000)
+                          }}
+                        />
+                        <span className="set-muted">秒</span>
+                      </>
+                    )}
+                  </div>
                 </Row>
                 <Row label="探测内容" hint="延迟 · 认证 · 余额（有接口时）">
                   <span className="set-muted">自动</span>

@@ -1153,6 +1153,9 @@ body {
   border-radius: 12px;
   overflow: hidden;
 }
+/* —— 检测间隔自定义输入 —— */
+.interval-custom { display: flex; align-items: center; gap: 8px; }
+.interval-custom-input { width: 90px; text-align: right; }
 /* —— 使用说明（设置 → 使用说明） —— */
 .guide { display: flex; flex-direction: column; gap: 14px; }
 .guide-step {
