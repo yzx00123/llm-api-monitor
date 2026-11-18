@@ -48,6 +48,18 @@ app.commandLine.appendSwitch('disable-site-isolation-trials')
 // Windows 通知（toast）需要固定 AUMID，否则 Notification 静默失败
 app.setAppUserModelId('com.yzx00123.llm-api-monitor')
 
+// 单实例锁：重复启动（双击 exe、快捷方式、任务栏再点开）时不新开窗口和
+// 托盘图标，而是把已经在跑的那个实例唤到前面来。否则会出现两个窗口、
+// 两个托盘图标，监测也会跑两份。
+const isPrimaryInstance = app.requestSingleInstanceLock()
+if (!isPrimaryInstance) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    showMainWindow()
+  })
+}
+
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 /** Set before app.quit() so the close handler doesn't swallow it into the tray. */
@@ -830,6 +842,8 @@ ipcMain.handle(
 )
 
 app.whenReady().then(() => {
+  // 已经有一个实例在跑：本进程直接退出，不建窗口/托盘/监测
+  if (!isPrimaryInstance) return
   // Custom providers + persisted keys must be visible to the monitor engine
   monitorEngine.registerProviders(getCustomProviders())
   monitorEngine.seedKeys(getApiKeys())

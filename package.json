@@ -1,6 +1,6 @@
 {
   "name": "llm-api-monitor",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "LLM API Real-time Monitor",
   "author": "yzx00123",
   "main": "./out/main/index.js",
