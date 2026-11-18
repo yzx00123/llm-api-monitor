@@ -403,8 +403,8 @@ export default function Settings({
                 </div>
               </div>
 
+              <h2 className="settings-section-title">常见问题</h2>
               <div className="settings-card">
-                <div className="settings-card-title">常见问题</div>
                 <div className="guide-item">
                   <b>密钥填在哪里？怎么一次填多个？</b>
                   <p>「密钥管理」页把密钥一行一个粘贴进输入框即可批量导入；点「测试」可先验证单个密钥能不能用。</p>
