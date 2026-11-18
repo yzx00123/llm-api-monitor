@@ -77,6 +77,8 @@ function useThrottledStatus(throttleMs: number = 300) {
 /** Stable empty object — a fresh `{}` every render breaks memoized children. */
 const EMPTY_STATUS: Record<string, ProviderStatus> = {}
 
+const INTERVAL_PRESETS = [5000, 10000, 30000, 60000, 300000, 1800000]
+
 export default function App() {
   const [view, setView] = useState<View>('dashboard')
   const [providers, setProviders] = useState<Provider[]>([])
@@ -88,6 +90,10 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [autoStart, setAutoStart] = useState(true)
   const [theme, setTheme] = useState<ThemeMode>('system')
+  const [customPick, setCustomPick] = useState(false)
+  const [customSec, setCustomSec] = useState(10)
+  const isPreset = INTERVAL_PRESETS.includes(interval)
+  const showCustom = customPick || !isPreset
 
   useEffect(() => {
     Promise.all([
@@ -211,16 +217,55 @@ export default function App() {
             <span className="stat checking"><span className="dot" />{throttled.checkingCount}</span>
           </div>
           <div className="controls">
-            <select
-              className="interval-select"
-              value={interval}
-              onChange={(e) => handleIntervalChange(Number(e.target.value))}
-            >
-              <option value={5000}>5 秒</option>
-              <option value={10000}>10 秒</option>
-              <option value={30000}>30 秒</option>
-              <option value={60000}>60 秒</option>
-            </select>
+            <div className="interval-custom">
+              <select
+                className="interval-select"
+                value={showCustom ? -1 : interval}
+                onChange={(e) => {
+                  const v = Number(e.target.value)
+                  if (v === -1) {
+                    setCustomPick(true)
+                    setCustomSec(Math.max(1, Math.round(interval / 1000)))
+                    return
+                  }
+                  setCustomPick(false)
+                  void handleIntervalChange(v)
+                }}
+              >
+                <option value={5000}>5 秒</option>
+                <option value={10000}>10 秒</option>
+                <option value={30000}>30 秒</option>
+                <option value={60000}>60 秒</option>
+                <option value={300000}>5 分钟</option>
+                <option value={1800000}>30 分钟</option>
+                <option value={-1}>自定义…</option>
+              </select>
+              {showCustom && (
+                <>
+                  <input
+                    className="form-input interval-custom-input"
+                    type="number"
+                    min={1}
+                    max={86400}
+                    value={customPick ? (customSec === 0 ? '' : customSec) : Math.round(interval / 1000)}
+                    onChange={(e) => {
+                      const raw = e.target.value
+                      if (raw === '') {
+                        setCustomPick(true)
+                        setCustomSec(0)
+                        return
+                      }
+                      const sec = Math.round(Number(raw))
+                      setCustomPick(true)
+                      setCustomSec(sec)
+                      if (sec >= 1 && sec <= 86400) void handleIntervalChange(sec * 1000)
+                    }}
+                    title="自定义间隔（秒）"
+                  />
+                  <span className="set-muted">秒</span>
+                </>
+              )}
+            </div>
             {monitoring ? (
               <button className="btn btn-stop" onClick={stopMonitoring}>■ 停止</button>
             ) : (
