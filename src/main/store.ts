@@ -27,6 +27,14 @@ interface StoreSchema {
      * unless you only monitor one vendor.
      */
     probeModel: string
+    /** Desktop notifications when a key goes down / runs out of money. */
+    alertsEnabled: boolean
+    /** Play a sound together with alert notifications. */
+    alertSound: boolean
+    /** Also notify when a key recovers or gets refilled. */
+    alertOnRecovery: boolean
+    /** Close button hides to tray and keeps monitoring instead of quitting. */
+    minimizeToTray: boolean
   }
 }
 
@@ -60,6 +68,13 @@ const store = new Store<StoreSchema>({
       autoStart: true,
       onboarded: false,
       theme: 'system',
+      probeText: '请用一句话介绍你自己。',
+      probeMaxTokens: 16,
+      probeModel: '',
+      alertsEnabled: true,
+      alertSound: true,
+      alertOnRecovery: true,
+      minimizeToTray: true,
     },
   },
 })
@@ -161,6 +176,14 @@ export type AppSettings = {
   probeMaxTokens: number
   /** Optional model override; empty = provider default (models[0]). */
   probeModel: string
+  /** Desktop notifications when a key goes down / runs out of money. */
+  alertsEnabled: boolean
+  /** Play a sound together with alert notifications. */
+  alertSound: boolean
+  /** Also notify when a key recovers or gets refilled. */
+  alertOnRecovery: boolean
+  /** Close button hides to tray and keeps monitoring instead of quitting. */
+  minimizeToTray: boolean
 }
 
 const SETTINGS_DEFAULTS: AppSettings = {
@@ -174,10 +197,17 @@ const SETTINGS_DEFAULTS: AppSettings = {
   // 16 tokens is enough for a first reply and keeps every check cheap.
   probeMaxTokens: 16,
   probeModel: '',
+  alertsEnabled: true,
+  alertSound: true,
+  alertOnRecovery: true,
+  minimizeToTray: true,
 }
 
 export function getSettings(): AppSettings {
-  return store.get('settings', SETTINGS_DEFAULTS)
+  // Spread defaults under the stored object: installs upgraded from older
+  // versions have a settings blob without the newer keys — without the merge
+  // those read as undefined (e.g. probeText undefined → probe falls back to Hi).
+  return { ...SETTINGS_DEFAULTS, ...store.get('settings', SETTINGS_DEFAULTS) }
 }
 
 export function updateSettings(updates: Partial<AppSettings>): void {

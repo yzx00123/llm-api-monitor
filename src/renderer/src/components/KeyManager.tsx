@@ -294,6 +294,17 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
                           {labels[k] && <b className="key-chip-label">{labels[k]}</b>}
                           {maskKey(k)}
                           <button
+                            className="key-chip-copy"
+                            onClick={() => {
+                              void window.electronAPI.copyText(k)
+                              setMsg('已复制密钥')
+                              setTimeout(() => setMsg(''), 1500)
+                            }}
+                            title="复制完整密钥"
+                          >
+                            ⧉
+                          </button>
+                          <button
                             className="key-chip-remove"
                             onClick={() => handleRemoveKey(pid, i)}
                             title="移除"

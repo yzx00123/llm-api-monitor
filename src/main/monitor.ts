@@ -4,6 +4,17 @@ import { fetchMimoBalance } from './mimo'
 
 export type MonitorStatus = 'idle' | 'checking' | 'online' | 'offline' | 'error'
 
+/** Alert kinds pushed to the desktop-notification layer (src/main/index.ts). */
+export type AlertKind = 'down' | 'recovered' | 'broke' | 'refilled'
+
+export interface StatusAlert {
+  kind: AlertKind
+  providerId: string
+  keyIndex: number
+  keyMask: string
+  detail?: string
+}
+
 export interface ProviderStatus {
   providerId: string
   /** Index of the key within that provider's key list — one box per key. */
@@ -12,6 +23,8 @@ export interface ProviderStatus {
   keyMask: string
   status: MonitorStatus
   latency: number | null
+  /** Recent successful latencies (oldest → newest, capped at 30) for the sparkline. */
+  latencyHistory?: number[]
   errorCode?: string
   lastChecked: number | null
   authStatus: 'unknown' | 'valid' | 'invalid'
@@ -37,7 +50,7 @@ export interface MonitorConfig {
 
 type StatusCallback = (statuses: Map<string, ProviderStatus>) => void
 
-class MonitorEngine {
+export class MonitorEngine {
   private timers: Map<string, NodeJS.Timeout> = new Map()
   private statuses: Map<string, ProviderStatus> = new Map()
   private keys: Map<string, string[]> = new Map()
@@ -52,6 +65,11 @@ class MonitorEngine {
   private failCount: Map<string, number> = new Map()
   /** Custom providers live outside PROVIDERS; register them so checkProvider can resolve. */
   private registry: Map<string, Provider> = new Map()
+  /** Latency ring buffer per statusKey (oldest → newest, cap 30) for the sparkline. */
+  private history: Map<string, number[]> = new Map()
+  /** Last stable (non-'checking') state per statusKey — alert diffing base. */
+  private stableState: Map<string, { status: MonitorStatus; broke: boolean }> = new Map()
+  private onAlert: ((alert: StatusAlert) => void) | null = null
 
   registerProviders(list: Provider[]) {
     for (const p of list) this.registry.set(p.id, p)
@@ -61,6 +79,8 @@ class MonitorEngine {
     this.registry.delete(id)
     this.removeKeys(id)
     this.statuses.delete(id)
+    for (const sk of [...this.history.keys()]) if (sk.startsWith(`${id}#`)) this.history.delete(sk)
+    for (const sk of [...this.stableState.keys()]) if (sk.startsWith(`${id}#`)) this.stableState.delete(sk)
     this.onStatusChange?.(this.statuses)
   }
 
@@ -97,6 +117,10 @@ class MonitorEngine {
 
   setOnStatusChange(cb: StatusCallback) {
     this.onStatusChange = cb
+  }
+
+  setOnAlert(cb: (alert: StatusAlert) => void) {
+    this.onAlert = cb
   }
 
   getStatuses(): Map<string, ProviderStatus> {
@@ -154,7 +178,9 @@ class MonitorEngine {
 
     // Limit concurrent requests to avoid overwhelming the system
     if (this.runningCount >= this.maxConcurrent) {
-      this.queue.push(providerId)
+      // Queue dedup: the same provider can be re-queued many times while it is
+      // waiting (interval fires, manual checkNow, key edit) — one slot is enough.
+      if (!this.queue.includes(providerId)) this.queue.push(providerId)
       return
     }
 
@@ -197,6 +223,7 @@ class MonitorEngine {
           const outOfMoney = MonitorEngine.isOutOfMoney(result)
           if (result.success) {
             this.failCount.set(sk, 0)
+            this.pushHistory(sk, latency)
           } else {
             this.failCount.set(sk, (this.failCount.get(sk) ?? 0) + 1)
           }
@@ -218,6 +245,7 @@ class MonitorEngine {
             keyMask,
             status: stickyStatus,
             latency: result.success ? latency : (before?.latency ?? null),
+            latencyHistory: this.historyFor(sk),
             errorCode: outOfMoney
               ? '余额不足，无法调用'
               : stickyStatus === 'error'
@@ -605,8 +633,51 @@ class MonitorEngine {
   }
 
   private updateStatus(providerId: string, status: ProviderStatus) {
+    const prev = this.statuses.get(providerId)
+    // Carry the latency ring through transient updates ('checking', error paths)
+    // that don't rebuild the history themselves.
+    if (status.latencyHistory === undefined) status.latencyHistory = prev?.latencyHistory
     this.statuses.set(providerId, status)
+
+    // Alert diffing runs on stable states only — the transient 'checking'
+    // updates between probes must never trigger down/recovered notifications.
+    if (status.status !== 'checking') {
+      const last = this.stableState.get(providerId)
+      const broke = status.errorCode === '余额不足，无法调用'
+      if (last) {
+        const wasDown = last.status === 'error' || last.status === 'offline'
+        const isDown = status.status === 'error' || status.status === 'offline'
+        if (!last.broke && broke) this.emitAlert('broke', status)
+        else if (last.broke && !broke && !isDown) this.emitAlert('refilled', status)
+        else if (!wasDown && isDown && !broke) this.emitAlert('down', status, status.errorCode)
+        else if (wasDown && !isDown) this.emitAlert('recovered', status)
+      }
+      this.stableState.set(providerId, { status: status.status, broke })
+    }
     this.onStatusChange?.(this.statuses)
+  }
+
+  private emitAlert(kind: AlertKind, status: ProviderStatus, detail?: string) {
+    this.onAlert?.({
+      kind,
+      providerId: status.providerId,
+      keyIndex: status.keyIndex,
+      keyMask: status.keyMask,
+      detail
+    })
+  }
+
+  /** Append one successful latency to the ring (cap 30). */
+  private pushHistory(sk: string, ms: number) {
+    const arr = this.history.get(sk) ?? []
+    arr.push(ms)
+    if (arr.length > 30) arr.shift()
+    this.history.set(sk, arr)
+  }
+
+  /** Snapshot copy of the ring for publishing on a ProviderStatus. */
+  private historyFor(sk: string): number[] | undefined {
+    return this.history.get(sk)?.slice()
   }
 
   /**
@@ -628,12 +699,14 @@ class MonitorEngine {
     const prev = this.statuses.get(sk)
     const outOfMoney = result.error ? MonitorEngine.isOutOfMoney({ status: result.status, error: result.error }) : false
 
+    if (result.ok && result.latencyMs >= 0) this.pushHistory(sk, result.latencyMs)
     this.updateStatus(sk, {
       providerId,
       keyIndex,
       keyMask: MonitorEngine.maskKey(key),
       status: result.ok ? 'online' : outOfMoney ? 'error' : prev?.authStatus === 'valid' && result.ok === false ? 'error' : 'error',
       latency: result.ok ? result.latencyMs : (prev?.latency ?? null),
+      latencyHistory: this.historyFor(sk),
       errorCode: result.ok
         ? outOfMoney
           ? '余额不足，无法调用'
@@ -667,6 +740,12 @@ class MonitorEngine {
     if (info === undefined) return
     const status = this.statuses.get(statusKey)
     if (!status) return
+    if (info === null) {
+      // null = clear (no cookie / unparseable) — don't run the guards below on it.
+      status.balanceInfo = null
+      this.onStatusChange?.(this.statuses)
+      return
+    }
     if (
       status.errorCode === '余额不足，无法调用' &&
       info.available != null &&

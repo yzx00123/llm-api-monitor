@@ -1,5 +1,6 @@
 import { memo, useState } from 'react'
 import type { Provider, ProviderStatus } from '../preload'
+import AgentExportModal from './AgentExportModal'
 
 interface Props {
   provider: Provider
@@ -61,6 +62,25 @@ function statusLabel(status: string | null): string {
   }
 }
 
+/** Mini sparkline of recent latencies — stretched viewBox, non-scaling stroke. */
+function Sparkline({ data, cls }: { data: number[]; cls: string }) {
+  const w = 60
+  const h = 16
+  const max = Math.max(...data, 1)
+  const pts = data
+    .map((v, i) => {
+      const x = (i / Math.max(data.length - 1, 1)) * w
+      const y = h - 1.5 - (v / max) * (h - 3)
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
+  return (
+    <svg className={`spark spark-${cls || 'good'}`} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
+      <polyline points={pts} />
+    </svg>
+  )
+}
+
 /**
  * Small box card — one per API key. Name + key mask + status dot on top,
  * latency + balance below. Detail lives in the hover tooltip.
@@ -69,8 +89,22 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
   const s = status
   const statusClass = s?.status ?? 'idle'
   const bal = formatBalance(s?.balanceInfo)
+  const hist = s?.latencyHistory ?? []
   const [editing, setEditing] = useState(false)
   const [connecting, setConnecting] = useState(false)
+  const [showExport, setShowExport] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  const handleCopyKey = async () => {
+    if (!fullKey) return
+    try {
+      await window.electronAPI.copyText(fullKey)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* clipboard denied */
+    }
+  }
 
   const handleMimoConnect = async () => {
     setConnecting(true)
@@ -123,7 +157,37 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
           <span className="box-name">{label || provider.name}</span>
         )}
       </div>
-      {keyMask && <div className="box-key">{keyMask}</div>}
+      {keyMask && (
+        <div className="box-key-row">
+          <div className="box-key">{keyMask}</div>
+          {fullKey && (
+            <div className="box-actions">
+              <button
+                className="box-action"
+                onClick={() => void handleCopyKey()}
+                title="复制完整密钥"
+              >
+                {copied ? '✓' : '⧉'}
+              </button>
+              <button
+                className="box-action"
+                onClick={() => setShowExport(true)}
+                title="导出到 Agent"
+              >
+                ⇪
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {hist.length >= 2 && (
+        <div
+          className="box-spark"
+          title={`最近 ${hist.length} 次延迟：${formatLatency(Math.min(...hist))} ~ ${formatLatency(Math.max(...hist))}`}
+        >
+          <Sparkline data={hist} cls={latencyClass(s?.latency ?? null)} />
+        </div>
+      )}
       <div className="box-meta">
         <span className={`box-latency ${latencyClass(s?.latency)}`}>
           {formatLatency(s?.latency ?? null)}
@@ -154,6 +218,15 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
           <button className="btn-mini" onClick={() => onCheckNow(provider.id, keyIndex)}>检测</button>
         ) : null}
       </div>
+
+      {showExport && fullKey && (
+        <AgentExportModal
+          provider={provider}
+          apiKey={fullKey}
+          label={label || provider.name}
+          onClose={() => setShowExport(false)}
+        />
+      )}
     </div>
   )
 }
@@ -176,6 +249,7 @@ function statusShallowEqual(
     a.errorCode === b.errorCode &&
     a.authStatus === b.authStatus &&
     a.lastChecked === b.lastChecked &&
+    (a.latencyHistory?.join(',') ?? '') === (b.latencyHistory?.join(',') ?? '') &&
     (a.balanceInfo?.available ?? null) === (b.balanceInfo?.available ?? null) &&
     (a.balanceInfo?.accountScope ?? false) === (b.balanceInfo?.accountScope ?? false)
   )

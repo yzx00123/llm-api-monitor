@@ -35,6 +35,38 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listModels: (providerId: string, key: string) =>
     ipcRenderer.invoke('monitor:listModels', providerId, key),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
+  copyText: (text: string) => ipcRenderer.invoke('app:copyText', text),
+  saveTextFile: (opts: { defaultName: string; content: string }) =>
+    ipcRenderer.invoke('app:saveTextFile', opts),
+  exportStatusCsv: () => ipcRenderer.invoke('app:exportStatusCsv'),
+  detectAgentConfigs: () => ipcRenderer.invoke('app:detectAgentConfigs'),
+  writeAgentConfig: (opts: {
+    target:
+      | 'claudeCode'
+      | 'cursorUser'
+      | 'codex'
+      | 'gemini'
+      | 'openCode'
+      | 'mimoDesktop'
+      | 'openclaw'
+      | 'deepseekHarness'
+      | 'kimiCode'
+      | 'minimaxCode'
+      | 'codebuddy'
+      | 'workbuddy'
+      | 'baiduComate'
+      | 'byteTrae'
+      | 'aliQoder'
+      | 'aliLingma'
+      | 'doubao'
+      | 'marscode'
+      | 'coze'
+      | 'custom'
+    path?: string
+    baseUrl: string
+    apiKey: string
+    model?: string
+  }) => ipcRenderer.invoke('app:writeAgentConfig', opts),
   onStatusUpdate: (callback: (statuses: Record<string, unknown>) => void) => {
     ipcRenderer.on('monitor:statusUpdate', (_event, statuses) => callback(statuses))
     return () => {

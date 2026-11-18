@@ -117,10 +117,47 @@ export default function Settings({
 }: Props) {
   const [section, setSection] = useState<SectionId>('general')
   const [version, setVersion] = useState('')
+  const [exporting, setExporting] = useState(false)
+  const [exportMsg, setExportMsg] = useState('')
+  const [extra, setExtra] = useState({
+    alertsEnabled: true,
+    alertSound: true,
+    alertOnRecovery: true,
+    minimizeToTray: true,
+  })
 
   useEffect(() => {
     window.electronAPI.getVersion().then(setVersion).catch(() => setVersion(''))
+    window.electronAPI
+      .getSettings()
+      .then((s) =>
+        setExtra({
+          alertsEnabled: s.alertsEnabled ?? true,
+          alertSound: s.alertSound ?? true,
+          alertOnRecovery: s.alertOnRecovery ?? true,
+          minimizeToTray: s.minimizeToTray ?? true,
+        })
+      )
+      .catch(() => {})
   }, [])
+
+  const patchExtra = (u: Partial<typeof extra>) => {
+    setExtra((p) => ({ ...p, ...u }))
+    void window.electronAPI.updateSettings(u)
+  }
+
+  const handleExportCsv = async () => {
+    setExporting(true)
+    setExportMsg('')
+    try {
+      const r = await window.electronAPI.exportStatusCsv()
+      setExportMsg(r.ok ? `已保存：${r.path}` : '已取消')
+    } catch {
+      setExportMsg('导出失败')
+    } finally {
+      setExporting(false)
+    }
+  }
 
   const handleGithub = useCallback(() => {
     window.open('https://github.com/yzx00123/llm-api-monitor', '_blank')
@@ -189,8 +226,27 @@ export default function Settings({
                 </Row>
               </div>
 
+              <h2 className="settings-section-title">后台运行</h2>
+              <div className="settings-card">
+                <Row label="关闭窗口时最小化到托盘" hint="监测继续运行，托盘图标一键唤出">
+                  <Toggle
+                    checked={extra.minimizeToTray}
+                    onChange={(v) => patchExtra({ minimizeToTray: v })}
+                    label="最小化到托盘"
+                  />
+                </Row>
+              </div>
+
               <h2 className="settings-section-title">数据</h2>
               <div className="settings-card">
+                <Row label="导出状态快照" hint="所有密钥状态存为 CSV（Excel 可直接打开）">
+                  <div className="set-inline">
+                    <button className="btn btn-start" onClick={handleExportCsv} disabled={exporting}>
+                      {exporting ? '导出中…' : '导出 CSV'}
+                    </button>
+                    {exportMsg && <span className="set-muted">{exportMsg}</span>}
+                  </div>
+                </Row>
                 <Row label="配置存储位置" hint="密钥仅保存在本机">
                   <code className="set-path">%APPDATA%\Electron\llm-monitor-config.json</code>
                 </Row>
@@ -235,6 +291,31 @@ export default function Settings({
                 </Row>
                 <Row label="探测内容" hint="延迟 · 认证 · 余额（有接口时）">
                   <span className="set-muted">自动</span>
+                </Row>
+              </div>
+
+              <h2 className="settings-section-title">告警通知</h2>
+              <div className="settings-card">
+                <Row label="掉线 / 余额不足时通知" hint="连续多次探测失败才告警，排除正常波动">
+                  <Toggle
+                    checked={extra.alertsEnabled}
+                    onChange={(v) => patchExtra({ alertsEnabled: v })}
+                    label="异常通知"
+                  />
+                </Row>
+                <Row label="恢复时也通知">
+                  <Toggle
+                    checked={extra.alertOnRecovery}
+                    onChange={(v) => patchExtra({ alertOnRecovery: v })}
+                    label="恢复通知"
+                  />
+                </Row>
+                <Row label="提示音">
+                  <Toggle
+                    checked={extra.alertSound}
+                    onChange={(v) => patchExtra({ alertSound: v })}
+                    label="提示音"
+                  />
                 </Row>
               </div>
             </>
