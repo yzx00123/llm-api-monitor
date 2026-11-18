@@ -1153,6 +1153,41 @@ body {
   border-radius: 12px;
   overflow: hidden;
 }
+/* —— 使用说明（设置 → 使用说明） —— */
+.guide { display: flex; flex-direction: column; gap: 14px; }
+.guide-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.guide-step:last-child { border-bottom: none; }
+.guide-step-num {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--green-bg);
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.guide-item {
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.guide-item:last-child { border-bottom: none; }
+.guide-step b, .guide-item b { font-size: 13px; color: var(--text); }
+.guide-step p, .guide-item p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
 .set-row {
   display: flex;
   align-items: center;

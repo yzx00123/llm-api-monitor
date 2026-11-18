@@ -21,13 +21,14 @@ interface Props {
   keyLabels: Record<string, string>
 }
 
-type SectionId = 'general' | 'appearance' | 'monitor' | 'latency' | 'about'
+type SectionId = 'general' | 'appearance' | 'monitor' | 'latency' | 'help' | 'about'
 
 const SECTIONS: Array<{ id: SectionId; label: string; icon: string }> = [
   { id: 'general', label: '通用', icon: '☰' },
   { id: 'appearance', label: '外观', icon: '◐' },
   { id: 'monitor', label: '监控', icon: '◉' },
   { id: 'latency', label: '测延迟', icon: '⚡' },
+  { id: 'help', label: '使用说明', icon: '📖' },
   { id: 'about', label: '关于', icon: 'ⓘ' },
 ]
 
@@ -328,6 +329,108 @@ export default function Settings({
               keyLabels={keyLabels}
               embedded
             />
+          )}
+
+          {section === 'help' && (
+            <div className="guide">
+              {/* GUIDE_BODY */}
+              <h2 className="settings-section-title">快速上手（三步）</h2>
+              <div className="settings-card">
+                <div className="guide-step">
+                  <span className="guide-step-num">1</span>
+                  <div>
+                    <b>导入密钥</b>
+                    <p>
+                      打开顶部「密钥管理」，把你的 API 密钥粘贴进去（支持一次贴多个，一行一个）。
+                      软件会自动实测识别每个密钥属于哪家厂商，也可以给密钥起个备注名。
+                    </p>
+                  </div>
+                </div>
+                <div className="guide-step">
+                  <span className="guide-step-num">2</span>
+                  <div>
+                    <b>开始监测</b>
+                    <p>
+                      回到「仪表盘点 ▶ 开始」，软件就按设定间隔自动探测每个密钥的可用性、延迟和余额。
+                      在设置里打开"打开软件自动开启监测"，以后开机就不用再手动点了。
+                    </p>
+                  </div>
+                </div>
+                <div className="guide-step">
+                  <span className="guide-step-num">3</span>
+                  <div>
+                    <b>看状态、等通知</b>
+                    <p>
+                      仪表盘每个小卡片代表一个密钥：圆点是状态（绿=在线、红=异常、灰=未检测），
+                      数字是延迟，小曲线是最近 30 次的延迟走势。有密钥掉线或余额不足时，
+                      右下角会弹系统通知提醒你，不用一直盯着窗口。
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <h2 className="settings-section-title">界面说明</h2>
+              <div className="settings-card">
+                <div className="guide-item">
+                  <b>仪表盘</b>
+                  <p>所有密钥的状态一览。鼠标悬停在卡片上可以看到错误原因、认证状态和余额详情。</p>
+                </div>
+                <div className="guide-item">
+                  <b>密钥管理</b>
+                  <p>
+                    增删密钥、改备注名、复制完整密钥；点卡片上的 ⇪ 还能把密钥一键写入
+                    Claude Code、Cursor、Codex 等 20 多种 Agent 工具的配置。
+                  </p>
+                </div>
+                <div className="guide-item">
+                  <b>供应商</b>
+                  <p>查看内置的 20 家厂商，或添加自定义供应商（支持 OpenAI 兼容 / Anthropic / Gemini 三种协议）。</p>
+                </div>
+                <div className="guide-item">
+                  <b>测延迟</b>
+                  <p>单独对某个密钥做一次真实请求，测出首字延迟和总耗时，适合两家之间横向对比。</p>
+                </div>
+                <div className="guide-item">
+                  <b>系统托盘</b>
+                  <p>
+                    关闭窗口默认缩到右下角托盘继续监测（可在「通用 → 后台运行」关闭）；
+                    托盘图标左键点开主界面，右键有开始 / 停止 / 退出菜单。
+                  </p>
+                </div>
+                <div className="guide-item">
+                  <b>导出快照</b>
+                  <p>「通用 → 导出状态快照」把所有密钥的状态、延迟、余额存成 CSV 表格，Excel 直接打开。</p>
+                </div>
+              </div>
+
+              <div className="settings-card">
+                <div className="settings-card-title">常见问题</div>
+                <div className="guide-item">
+                  <b>密钥填在哪里？怎么一次填多个？</b>
+                  <p>「密钥管理」页把密钥一行一个粘贴进输入框即可批量导入；点「测试」可先验证单个密钥能不能用。</p>
+                </div>
+                <div className="guide-item">
+                  <b>密钥多了会不会检测很慢？</b>
+                  <p>每轮最多同时检测 5 个，多出来的排队等下一轮；同一个供应商不会被重复排进队列。</p>
+                </div>
+                <div className="guide-item">
+                  <b>为什么显示「离线」，但我觉得它还能用？</b>
+                  <p>为了减少误报，连续 3 次失败才会判定为离线；网络抖动一下不会马上变红。</p>
+                </div>
+                <div className="guide-item">
+                  <b>通知弹不出来？</b>
+                  <p>检查 Windows 的「专注助手 / 通知设置」是否拦截了应用通知；通知开关在本页「监测 → 告警通知」。</p>
+                </div>
+                <div className="guide-item">
+                  <b>关了窗口程序就停了吗？</b>
+                  <p>不会。默认缩到右下角托盘继续监测；想真正退出用托盘右键「退出」，或在「通用 → 后台运行」关闭该行为。</p>
+                </div>
+                <div className="guide-item">
+                  <b>配置存在哪里？换电脑怎么迁移？</b>
+                  <p>配置文件路径见本页「通用 → 数据」；把该文件拷到新电脑的相同位置即可迁移密钥和设置。</p>
+                </div>
+              </div>
+            </div>
           )}
 
           {section === 'about' && (
