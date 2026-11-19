@@ -3,6 +3,7 @@ import {
   UsageSample,
   getBalanceHistory,
   getCustomProviders,
+  getProbeUsage,
   getUsageHistory,
 } from './store'
 import { PROVIDERS } from './providers'
@@ -72,6 +73,37 @@ export interface UsageReport {
   /** 累计消费（MiMo 控制台原值）。 */
   totalCost: number | null
   lastSampleAt: number | null
+}
+
+// ===== 通用 token 用量（全厂商，来自本软件自身探测） =====
+
+/** 某厂商在某天的探测 token 消耗。 */
+export interface TokenProviderDay {
+  providerId: string
+  name: string
+  prompt: number
+  completion: number
+  total: number
+}
+
+export interface TokenDay {
+  date: string
+  total: number
+  byProvider: TokenProviderDay[]
+}
+
+export interface TokenReport {
+  /** 升序（最早 → 今天），长度 = 请求天数。 */
+  days: TokenDay[]
+  todayToken: number
+  weekToken: number
+  monthToken: number
+  allToken: number
+  /** 所选区间内各厂商合计 —— 占比 / 排行用。 */
+  providerTotals: TokenProviderDay[]
+  sampleCount: number
+  firstDay: string | null
+  lastDay: string | null
 }
 
 function dateKey(ts: number): string {
@@ -367,6 +399,109 @@ export function buildUsageReport(days: number): UsageReport {
     monthCost: latest.monthCost,
     totalCost: latest.totalCost,
     lastSampleAt: latest.t,
+  }
+}
+
+/**
+ * 通用 token 用量报表 —— 全厂商、全用户可用。
+ *
+ * 数据只来自本软件自己发起的探测请求（探测响应体里的 usage 字段），按天 ×
+ * 厂商累加。它统计的是「这个监测工具自己烧了多少 token」，不是厂商账单里
+ * 的总用量（那需要每个厂商各自的账单接口，目前只有 MiMo 控制台有）。
+ * 界面上必须写明这一点，不能冒充总用量。
+ */
+export function buildTokenReport(days: number): TokenReport {
+  const dayCount = Math.max(1, Math.min(366, Math.floor(days) || 30))
+  const table = getProbeUsage()
+
+  // date -> providerId -> 累计
+  const perDay = new Map<string, Map<string, { prompt: number; completion: number; total: number }>>()
+  for (const [dk, providers] of Object.entries(table)) {
+    const row = new Map<string, { prompt: number; completion: number; total: number }>()
+    for (const [providerId, usage] of Object.entries(providers)) {
+      if (!usage || !Number.isFinite(usage.total)) continue
+      row.set(providerId, {
+        prompt: usage.prompt || 0,
+        completion: usage.completion || 0,
+        total: usage.total || 0,
+      })
+    }
+    if (row.size > 0) perDay.set(dk, row)
+  }
+
+  const sortedDates = [...perDay.keys()].sort()
+  const today = startOfToday()
+  const windowDays: TokenDay[] = []
+  for (let offset = dayCount - 1; offset >= 0; offset--) {
+    const dk = dateKey(today - offset * DAY_MS)
+    const row = perDay.get(dk)
+    const byProvider: TokenProviderDay[] = row
+      ? [...row.entries()]
+          .map(([providerId, u]) => ({
+            providerId,
+            name: providerName(providerId),
+            prompt: u.prompt,
+            completion: u.completion,
+            total: u.total,
+          }))
+          .filter((p) => p.total > 0)
+          .sort((a, b) => b.total - a.total)
+      : []
+    windowDays.push({
+      date: dk,
+      total: byProvider.reduce((sum, p) => sum + p.total, 0),
+      byProvider,
+    })
+  }
+
+  // 各厂商合计（窗口内）
+  const providerSum = new Map<string, TokenProviderDay>()
+  for (const day of windowDays) {
+    for (const p of day.byProvider) {
+      const cur = providerSum.get(p.providerId)
+      if (cur) {
+        cur.prompt += p.prompt
+        cur.completion += p.completion
+        cur.total += p.total
+      } else {
+        providerSum.set(p.providerId, { ...p })
+      }
+    }
+  }
+  const providerTotals = [...providerSum.values()].sort((a, b) => b.total - a.total)
+
+  const sumLastDays = (n: number): number => {
+    const slice = windowDays.slice(-Math.min(n, windowDays.length))
+    return slice.reduce((sum, d) => sum + d.total, 0)
+  }
+  const firstOfMonth = new Date(today)
+  firstOfMonth.setDate(1)
+  firstOfMonth.setHours(0, 0, 0, 0)
+  let monthToken = 0
+  for (const [dk, row] of perDay) {
+    const [y, m] = dk.split('-').map(Number)
+    if (y === firstOfMonth.getFullYear() && m === firstOfMonth.getMonth() + 1) {
+      for (const u of row.values()) monthToken += u.total
+    }
+  }
+
+  let sampleCount = 0
+  for (const row of perDay.values()) sampleCount += row.size
+
+  return {
+    days: windowDays,
+    todayToken: windowDays[windowDays.length - 1]?.total ?? 0,
+    weekToken: sumLastDays(7),
+    monthToken,
+    allToken: sortedDates.reduce((sum, dk) => {
+      let s = 0
+      for (const u of perDay.get(dk)!.values()) s += u.total
+      return sum + s
+    }, 0),
+    providerTotals,
+    sampleCount,
+    firstDay: sortedDates[0] ?? null,
+    lastDay: sortedDates[sortedDates.length - 1] ?? null,
   }
 }
 

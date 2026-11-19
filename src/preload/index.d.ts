@@ -58,6 +58,8 @@ export interface ElectronAPI {
   getDailyReport: (days?: number, currency?: string) => Promise<DailyReport>
   /** MiMo 控制台 token 用量（累计值差分，连了控制台才有数据）。 */
   getUsageReport: (days?: number) => Promise<UsageReport>
+  /** 通用 token 用量：本软件探测自身消耗，按天 × 厂商聚合（全厂商可用）。 */
+  getTokenReport: (days?: number) => Promise<TokenReport>
   /** 导出账单 CSV（带 BOM）。 */
   exportReportCsv: (days?: number, currency?: string) => Promise<{ ok: boolean; path?: string }>
   detectAgentConfigs: () => Promise<Record<string, { path: string; exists: boolean }>>
@@ -185,6 +187,33 @@ export interface UsageReport {
   monthCost: number | null
   totalCost: number | null
   lastSampleAt: number | null
+}
+
+// 通用 token 用量（本软件探测自身消耗，全厂商）
+export interface TokenProviderDay {
+  providerId: string
+  name: string
+  prompt: number
+  completion: number
+  total: number
+}
+
+export interface TokenDay {
+  date: string
+  total: number
+  byProvider: TokenProviderDay[]
+}
+
+export interface TokenReport {
+  days: TokenDay[]
+  todayToken: number
+  weekToken: number
+  monthToken: number
+  allToken: number
+  providerTotals: TokenProviderDay[]
+  sampleCount: number
+  firstDay: string | null
+  lastDay: string | null
 }
 
 export interface Window {

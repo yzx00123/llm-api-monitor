@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDailyReport: (days?: number, currency?: string) =>
     ipcRenderer.invoke('report:getDaily', days, currency),
   getUsageReport: (days?: number) => ipcRenderer.invoke('report:getUsage', days),
+  // 通用 token 用量（本软件探测自身消耗，全厂商）
+  getTokenReport: (days?: number) => ipcRenderer.invoke('report:getToken', days),
   exportReportCsv: (days?: number, currency?: string) =>
     ipcRenderer.invoke('report:exportCsv', days, currency),
   detectAgentConfigs: () => ipcRenderer.invoke('app:detectAgentConfigs'),

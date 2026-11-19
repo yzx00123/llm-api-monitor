@@ -74,6 +74,17 @@ export interface UsageSampleEvent {
 
 type StatusCallback = (statuses: Map<string, ProviderStatus>) => void
 
+/**
+ * 一次探测实际消耗的 token（从响应体 usage 字段读出）。
+ * 只反映本软件自己发起的探测，不是厂商账单里的总用量。
+ */
+export interface ProbeUsageEvent {
+  providerId: string
+  prompt: number
+  completion: number
+  total: number
+}
+
 export class MonitorEngine {
   private timers: Map<string, NodeJS.Timeout> = new Map()
   private statuses: Map<string, ProviderStatus> = new Map()
@@ -97,6 +108,8 @@ export class MonitorEngine {
   /** 余额 / 用量采样回调 —— 消费账单的唯一数据来源。 */
   private onBalanceSample: ((sample: BalanceSampleEvent) => void) | null = null
   private onUsageSample: ((sample: UsageSampleEvent) => void) | null = null
+  /** 探测自身消耗的 token 回调 —— 通用 token 用量的唯一数据来源。 */
+  private onProbeUsage: ((usage: ProbeUsageEvent) => void) | null = null
   /** MiMo 用量是账号级的，一个节流位就够（不用按密钥算）。 */
   private lastUsageAt: Map<string, number> = new Map()
 
@@ -160,6 +173,24 @@ export class MonitorEngine {
   /** MiMo 累计用量样本回调（账单 token 统计用）。 */
   setOnUsageSample(cb: (sample: UsageSampleEvent) => void) {
     this.onUsageSample = cb
+  }
+
+  /** 探测自身消耗的 token 回调（通用 token 用量统计用）。 */
+  setOnProbeUsage(cb: (usage: ProbeUsageEvent) => void) {
+    this.onProbeUsage = cb
+  }
+
+  /** 从探测响应里读到 usage 就上报；读不到（老网关不返回）就静默跳过。 */
+  private reportProbeUsage(providerId: string, body: string, parse: (data: any) => ProbeUsageEvent | null): void {
+    if (!this.onProbeUsage) return
+    try {
+      const evt = parse(JSON.parse(body))
+      if (evt && Number.isFinite(evt.total) && evt.total > 0) {
+        this.onProbeUsage({ ...evt, providerId })
+      }
+    } catch {
+      // 响应不是 JSON 或没有 usage 字段 —— 不影响监测，也不记账
+    }
   }
 
   /**
@@ -459,6 +490,15 @@ export class MonitorEngine {
             status: resp.status,
           }
         }
+        // 顺手记下这次探测烧掉的 token（通用 token 用量统计）。
+        this.reportProbeUsage(provider.id, text, (data) => {
+          const u = data?.usage
+          if (!u) return null
+          const prompt = Number(u.prompt_tokens ?? u.input_tokens) || 0
+          const completion = Number(u.completion_tokens ?? u.output_tokens) || 0
+          const total = Number(u.total_tokens) || prompt + completion
+          return { providerId: provider.id, prompt, completion, total }
+        })
         return { success: true, authValid: true, status: resp.status }
       }
       if (resp.status === 401 || resp.status === 403) {
@@ -542,6 +582,15 @@ export class MonitorEngine {
       clearTimeout(timeout)
 
       if (resp.ok) {
+        // 读 body 拿 usage（Anthropic 用 input_tokens/output_tokens）。
+        const text = await resp.text()
+        this.reportProbeUsage(provider.id, text, (data) => {
+          const u = data?.usage
+          if (!u) return null
+          const prompt = Number(u.input_tokens) || 0
+          const completion = Number(u.output_tokens) || 0
+          return { providerId: provider.id, prompt, completion, total: prompt + completion }
+        })
         return { success: true, authValid: true, status: resp.status }
       }
       if (resp.status === 401 || resp.status === 403) {
@@ -594,6 +643,16 @@ export class MonitorEngine {
       clearTimeout(timeout)
 
       if (resp.ok) {
+        // 读 body 拿 usage（Gemini 用 usageMetadata.promptTokenCount/...）。
+        const text = await resp.text()
+        this.reportProbeUsage(provider.id, text, (data) => {
+          const u = data?.usageMetadata
+          if (!u) return null
+          const prompt = Number(u.promptTokenCount) || 0
+          const completion = Number(u.candidatesTokenCount) || 0
+          const total = Number(u.totalTokenCount) || prompt + completion
+          return { providerId: provider.id, prompt, completion, total }
+        })
         return { success: true, authValid: true, status: resp.status }
       }
       if (resp.status === 400 || resp.status === 403) {

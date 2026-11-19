@@ -31,8 +31,10 @@ import {
   updateSettings,
   appendBalanceSample,
   appendUsageSample,
+  appendProbeUsage,
+  getProbeUsage,
 } from './store'
-import { buildDailyReport, buildUsageReport, buildReportCsv } from './report'
+import { buildDailyReport, buildUsageReport, buildReportCsv, buildTokenReport } from './report'
 
 // ===== 内存极限压榨：全部实测验证后保留 =====
 // 监控类应用的界面几乎全是静态卡片、低频刷新，不需要 GPU 硬件加速。
@@ -301,6 +303,9 @@ ipcMain.handle('report:getDaily', (_event, days?: number, currency?: string) =>
 )
 
 ipcMain.handle('report:getUsage', (_event, days?: number) => buildUsageReport(days ?? 30))
+
+// 通用 token 用量：本软件探测自身消耗，按天 × 厂商聚合（全厂商通用）。
+ipcMain.handle('report:getToken', (_event, days?: number) => buildTokenReport(days ?? 30))
 
 ipcMain.handle('report:exportCsv', async (_event, days?: number, currency?: string) => {
   const now = new Date()
@@ -883,6 +888,8 @@ app.whenReady().then(() => {
   // 余额 / MiMo 累计用量样本 → 本地账本（消费账单的数据源）
   monitorEngine.setOnBalanceSample((sample) => appendBalanceSample({ ...sample, t: Date.now() }))
   monitorEngine.setOnUsageSample((sample) => appendUsageSample({ ...sample, t: Date.now() }))
+  // 探测自身消耗的 token → 本地按天账本（通用 token 用量，全厂商）
+  monitorEngine.setOnProbeUsage((usage) => appendProbeUsage(usage.providerId, Date.now(), usage))
   // 系统托盘：关窗后监测继续，托盘一键唤出
   createTray()
 

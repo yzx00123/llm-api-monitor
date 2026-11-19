@@ -11,6 +11,8 @@ interface StoreSchema {
   balanceHistory: BalanceSample[]
   /** MiMo console cumulative usage readings (token + cost counters). */
   usageHistory: UsageSample[]
+  /** Per-day token counts consumed by this app's own probes, per provider. */
+  probeUsage: Record<string, Record<string, ProbeUsageDay>>
   settings: {
     intervalMs: number
     enabled: boolean
@@ -91,6 +93,16 @@ export interface UsageSample {
   monthCost: number
 }
 
+/**
+ * 某一天、某个厂商的探测 token 消耗（按天聚合的稀疏表）。
+ * 数据只来自本软件自己发起的探测请求，不是厂商账单里的总用量。
+ */
+export interface ProbeUsageDay {
+  prompt: number
+  completion: number
+  total: number
+}
+
 /** 本地账本保留天数。再久的日常明细意义不大，还会让配置文件越来越大。 */
 const HISTORY_DAYS = 200
 /** 硬上限，防止长时间运行把配置文件撑爆。 */
@@ -156,6 +168,45 @@ export function appendUsageSample(sample: UsageSample): void {
   store.set('usageHistory', pruneSamples(rows))
 }
 
+/** 本地日期键（与 report.ts 的 dateKey 一致：本地时区 YYYY-MM-DD）。 */
+function dateKey(t: number): string {
+  const d = new Date(t)
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${m}-${day}`
+}
+
+export function getProbeUsage(): Record<string, Record<string, ProbeUsageDay>> {
+  return store.get('probeUsage', {})
+}
+
+/**
+ * 累加一次探测消耗的 token（按天 × 厂商聚合成稀疏表）。
+ * 同时清理超出 HISTORY_DAYS 的旧日期，防止配置文件无限增长。
+ */
+export function appendProbeUsage(
+  providerId: string,
+  t: number,
+  usage: { prompt: number; completion: number; total: number }
+): void {
+  if (!Number.isFinite(usage.total) || usage.total <= 0) return
+  const table = store.get('probeUsage', {})
+  const day = dateKey(t)
+  const perProvider = table[day] ?? {}
+  const cur = perProvider[providerId] ?? { prompt: 0, completion: 0, total: 0 }
+  perProvider[providerId] = {
+    prompt: cur.prompt + (Number.isFinite(usage.prompt) ? usage.prompt : 0),
+    completion: cur.completion + (Number.isFinite(usage.completion) ? usage.completion : 0),
+    total: cur.total + usage.total,
+  }
+  table[day] = perProvider
+  const cutoff = dateKey(Date.now() - HISTORY_DAYS * 24 * 60 * 60 * 1000)
+  for (const key of Object.keys(table)) {
+    if (key < cutoff) delete table[key]
+  }
+  store.set('probeUsage', table)
+}
+
 const store = new Store<StoreSchema>({
   name: 'llm-monitor-config',
   defaults: {
@@ -165,6 +216,7 @@ const store = new Store<StoreSchema>({
     customProviders: [],
     balanceHistory: [],
     usageHistory: [],
+    probeUsage: {},
     settings: {
       intervalMs: 10000,
       enabled: false,

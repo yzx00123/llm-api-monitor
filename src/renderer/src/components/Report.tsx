@@ -3,6 +3,7 @@ import type {
   DailyReport,
   ReportDay,
   ReportProviderAmount,
+  TokenReport,
   UsageReport
 } from '../preload'
 
@@ -286,18 +287,21 @@ export default function Report({ onBack }: ReportProps): React.JSX.Element {
   const [currency, setCurrency] = useState<string | undefined>(undefined)
   const [report, setReport] = useState<DailyReport | null>(null)
   const [usage, setUsage] = useState<UsageReport | null>(null)
+  const [token, setToken] = useState<TokenReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
   const [exportMsg, setExportMsg] = useState('')
 
   const load = useCallback(async () => {
     try {
-      const [daily, usageReport] = await Promise.all([
+      const [daily, usageReport, tokenReport] = await Promise.all([
         window.electronAPI.getDailyReport(days, currency),
-        window.electronAPI.getUsageReport(days)
+        window.electronAPI.getUsageReport(days),
+        window.electronAPI.getTokenReport(days)
       ])
       setReport(daily)
       setUsage(usageReport)
+      setToken(tokenReport)
       if (daily.currencies.length > 0 && !currency) setCurrency(daily.currencies[0])
     } finally {
       setLoading(false)
@@ -484,10 +488,63 @@ export default function Report({ onBack }: ReportProps): React.JSX.Element {
         )}
       </div>
 
-      <h2 className="settings-section-title">MiMo token 用量</h2>
+      <h2 className="settings-section-title">token 用量</h2>
       <div className="settings-card report-card">
-        {usageDays ? (
+        {token && token.sampleCount > 0 ? (
           <>
+            <div className="report-stats report-stats-usage">
+              <StatCard label="今日 token" value={formatTokens(token.todayToken)} />
+              <StatCard label="近 7 天 token" value={formatTokens(token.weekToken)} />
+              <StatCard label="本月 token" value={formatTokens(token.monthToken)} />
+              <StatCard
+                label="累计 token"
+                value={formatTokens(token.allToken)}
+                hint={token.firstDay ? `自 ${token.firstDay} 起` : undefined}
+              />
+            </div>
+
+            {token.providerTotals.length > 0 && (
+              <table className="report-table">
+                <thead>
+                  <tr>
+                    <th>厂商</th>
+                    <th className="report-num">输入</th>
+                    <th className="report-num">输出</th>
+                    <th className="report-num">合计</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {token.providerTotals.map((p) => (
+                    <tr key={p.providerId}>
+                      <td>{p.name}</td>
+                      <td className="report-num">{formatTokens(p.prompt)}</td>
+                      <td className="report-num">{formatTokens(p.completion)}</td>
+                      <td className="report-num">
+                        <strong>{formatTokens(p.total)}</strong>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            <p className="report-note">
+              这里统计的是<b>本软件自己发起的探测</b>所消耗的 token（每次检测延迟都会向厂商发一小段请求），按天 ×
+              厂商累加，所有厂商通用。它不是厂商账单里的总用量 —— 你平时在别处调 API
+              花的 token 不会算进来，本软件也不读任何厂商的账单接口。
+            </p>
+          </>
+        ) : (
+          <div className="report-empty">
+            还没有探测记录。开始监测后，每次延迟检测都会统计消耗的 token，这里就会按厂商汇总。
+          </div>
+        )}
+      </div>
+
+      {usageDays && (
+        <>
+          <h2 className="settings-section-title">MiMo 控制台用量（账户级）</h2>
+          <div className="settings-card report-card">
             <div className="report-stats report-stats-usage">
               <StatCard label="今日 token" value={formatTokens(usageDays.todayToken)} />
               <StatCard label="本月 token" value={formatTokens(usageDays.monthToken)} />
@@ -504,16 +561,12 @@ export default function Report({ onBack }: ReportProps): React.JSX.Element {
               />
             </div>
             <p className="report-note">
-              token 数据取自 MiMo 控制台的累计用量（含输入/输出/命中缓存），按天做差值；只有在「密钥管理 → 连接
-              MiMo 控制台」保持登录时才会更新。
+              这一段是<b>小米 MiMo 控制台的账户级用量</b>（你在所有地方花的都算，含输入/输出/命中缓存），按天做差值；只有在「密钥管理 → 连接
+              MiMo 控制台」保持登录时才会更新。其他厂商没有开放这类接口，所以只显示上面的探测用量。
             </p>
-          </>
-        ) : (
-          <div className="report-empty">
-            还没连 MiMo 控制台，拿不到 token 用量。到「密钥管理」点小米 MiMo 卡片的「连接控制台」登录一次即可。
           </div>
-        )}
-      </div>
+        </>
+      )}
 
       <p className="report-note">
         统计口径：① 每天的花费 = 当天首次余额 − 当天最后一次余额，只统计软件运行期间；② 软件关掉的时段产生的费用，会并到下次打开软件那一天；③
