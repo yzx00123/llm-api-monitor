@@ -438,6 +438,13 @@ export default function Settings({
                   <p>单独对某个密钥做一次真实请求，测出首字延迟和总耗时，适合两家之间横向对比。</p>
                 </div>
                 <div className="guide-item">
+                  <b>账单</b>
+                  <p>
+                    按天统计每家厂商花了多少钱（余额差值得出），可切折线图 / 柱状图 / 树状图，支持导出 CSV；
+                    连了 MiMo 控制台还能看到 token 用量和本月花费。
+                  </p>
+                </div>
+                <div className="guide-item">
                   <b>系统托盘</b>
                   <p>
                     关闭窗口默认缩到右下角托盘继续监测（可在「通用 → 后台运行」关闭）；

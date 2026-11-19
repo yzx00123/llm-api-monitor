@@ -54,6 +54,12 @@ export interface ElectronAPI {
   saveTextFile: (opts: { defaultName: string; content: string }) => Promise<{ ok: boolean; path?: string }>
   /** Save a CSV snapshot of all key statuses (Excel-friendly, BOM). */
   exportStatusCsv: () => Promise<{ ok: boolean; path?: string }>
+  /** 每日消费汇总（本地余额账本推导）。 */
+  getDailyReport: (days?: number, currency?: string) => Promise<DailyReport>
+  /** MiMo 控制台 token 用量（累计值差分，连了控制台才有数据）。 */
+  getUsageReport: (days?: number) => Promise<UsageReport>
+  /** 导出账单 CSV（带 BOM）。 */
+  exportReportCsv: (days?: number, currency?: string) => Promise<{ ok: boolean; path?: string }>
   detectAgentConfigs: () => Promise<Record<string, { path: string; exists: boolean }>>
   writeAgentConfig: (opts: {
     target:
@@ -137,6 +143,48 @@ export interface BalanceInfo {
   /** Console userId when known — helps spot a wrong-account cookie. */
   accountId?: string
   raw?: unknown
+}
+
+/** 账单：每天每个厂商的消费金额。 */
+export interface ReportProviderAmount {
+  providerId: string
+  name: string
+  amount: number
+}
+
+export interface ReportDay {
+  date: string
+  total: number
+  byProvider: ReportProviderAmount[]
+}
+
+export interface DailyReport {
+  currency: string
+  currencies: string[]
+  days: ReportDay[]
+  totals: { today: number; week: number; month: number; all: number }
+  providerTotals: ReportProviderAmount[]
+  sampleCount: number
+  firstSampleAt: number | null
+  lastSampleAt: number | null
+}
+
+export interface UsageDay {
+  date: string
+  tokens: number
+  cost: number
+}
+
+export interface UsageReport {
+  available: boolean
+  days: UsageDay[]
+  totalToken: number | null
+  monthToken: number | null
+  todayToken: number
+  todayCost: number
+  monthCost: number | null
+  totalCost: number | null
+  lastSampleAt: number | null
 }
 
 export interface Window {

@@ -7,6 +7,10 @@ interface StoreSchema {
   /** MiMo console session cookie (api-platform_serviceToken=...; userId=...). */
   mimoCookie: string
   customProviders: CustomProvider[]
+  /** Wallet readings, used to build the daily spending report (账单). */
+  balanceHistory: BalanceSample[]
+  /** MiMo console cumulative usage readings (token + cost counters). */
+  usageHistory: UsageSample[]
   settings: {
     intervalMs: number
     enabled: boolean
@@ -55,6 +59,103 @@ interface CustomProvider {
   updatedAt: number
 }
 
+/**
+ * 消费账单用的余额快照。
+ *
+ * 余额接口只给「此刻的钱包余额」，没有任何厂商提供按天账单（MiMo 控制台是
+ * 例外，但也只是累计用量）。所以每日消费只能由余额差值推导：每次成功读到
+ * 余额就追加一条样本，report.ts 把相邻样本换算成「当天花了多少」。
+ * 数据全部留在本机，不联网、不上传。
+ */
+export interface BalanceSample {
+  /** 采样时间（毫秒时间戳）。 */
+  t: number
+  providerId: string
+  /** 同一供应商下的第几个密钥；-1 = 账号级钱包（MiMo 控制台，不按密钥区分）。 */
+  keyIndex: number
+  currency: string
+  available: number
+  /** 账号级钱包（一个登录号一份余额，多个密钥共用）。 */
+  accountScope?: boolean
+}
+
+/** MiMo 控制台的累计用量样本（token 与金额都是累计值，按天做差值即可）。 */
+export interface UsageSample {
+  t: number
+  providerId: string
+  totalToken: number
+  inputToken: number
+  outputToken: number
+  cacheToken: number
+  totalCost: number
+  monthCost: number
+}
+
+/** 本地账本保留天数。再久的日常明细意义不大，还会让配置文件越来越大。 */
+const HISTORY_DAYS = 200
+/** 硬上限，防止长时间运行把配置文件撑爆。 */
+const MAX_SAMPLES = 20000
+/** 同一个钱包、金额没变的读数在这个窗口内只记一条（去重轮询噪声）。 */
+const SAMPLE_DEDUPE_MS = 10 * 60 * 1000
+
+function pruneSamples<T extends { t: number }>(rows: T[]): T[] {
+  const cutoff = Date.now() - HISTORY_DAYS * 24 * 60 * 60 * 1000
+  const kept = rows.filter((row) => row.t >= cutoff)
+  return kept.length > MAX_SAMPLES ? kept.slice(kept.length - MAX_SAMPLES) : kept
+}
+
+/** 从后往前找最后一条匹配样本（比 reverse() 省一次数组复制）。 */
+function findLast<T>(rows: T[], match: (row: T) => boolean): T | undefined {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (match(rows[i])) return rows[i]
+  }
+  return undefined
+}
+
+export function getBalanceHistory(): BalanceSample[] {
+  return store.get('balanceHistory', [])
+}
+
+/** 追加一条余额样本；同钱包同金额的重复读数会被折叠。 */
+export function appendBalanceSample(sample: BalanceSample): void {
+  if (!Number.isFinite(sample.available)) return
+  const rows = store.get('balanceHistory', [])
+  const last = findLast(
+    rows,
+    (row) => row.providerId === sample.providerId && row.keyIndex === sample.keyIndex
+  )
+  if (
+    last &&
+    last.currency === sample.currency &&
+    last.available === sample.available &&
+    sample.t - last.t < SAMPLE_DEDUPE_MS
+  ) {
+    return
+  }
+  rows.push(sample)
+  store.set('balanceHistory', pruneSamples(rows))
+}
+
+export function getUsageHistory(): UsageSample[] {
+  return store.get('usageHistory', [])
+}
+
+/** 追加一条累计用量样本；累计值没变时不重复记录。 */
+export function appendUsageSample(sample: UsageSample): void {
+  const rows = store.get('usageHistory', [])
+  const last = findLast(rows, (row) => row.providerId === sample.providerId)
+  if (
+    last &&
+    last.totalToken === sample.totalToken &&
+    last.totalCost === sample.totalCost &&
+    sample.t - last.t < SAMPLE_DEDUPE_MS
+  ) {
+    return
+  }
+  rows.push(sample)
+  store.set('usageHistory', pruneSamples(rows))
+}
+
 const store = new Store<StoreSchema>({
   name: 'llm-monitor-config',
   defaults: {
@@ -62,6 +163,8 @@ const store = new Store<StoreSchema>({
     keyLabels: {},
     mimoCookie: '',
     customProviders: [],
+    balanceHistory: [],
+    usageHistory: [],
     settings: {
       intervalMs: 10000,
       enabled: false,

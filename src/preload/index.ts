@@ -39,6 +39,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveTextFile: (opts: { defaultName: string; content: string }) =>
     ipcRenderer.invoke('app:saveTextFile', opts),
   exportStatusCsv: () => ipcRenderer.invoke('app:exportStatusCsv'),
+  // 消费账单（本地账本推导，不联网）
+  getDailyReport: (days?: number, currency?: string) =>
+    ipcRenderer.invoke('report:getDaily', days, currency),
+  getUsageReport: (days?: number) => ipcRenderer.invoke('report:getUsage', days),
+  exportReportCsv: (days?: number, currency?: string) =>
+    ipcRenderer.invoke('report:exportCsv', days, currency),
   detectAgentConfigs: () => ipcRenderer.invoke('app:detectAgentConfigs'),
   writeAgentConfig: (opts: {
     target:

@@ -25,9 +25,22 @@ import type { BalanceInfo } from './monitor'
 
 const CONSOLE_URL = 'https://platform.xiaomimimo.com/console'
 const BALANCE_URL = 'https://platform.xiaomimimo.com/api/v1/balance'
+const USAGE_URL = 'https://platform.xiaomimimo.com/api/v1/usage'
 const COOKIE_NAMES = new Set(['api-platform_serviceToken', 'userId'])
 const POLL_MS = 800
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
+
+/** MiMo 控制台累计用量（token 均为累计值，金额同理）。 */
+export interface MimoUsage {
+  totalToken: number
+  inputToken: number
+  outputToken: number
+  cacheToken: number
+  /** 开户至今累计消费金额（元）。 */
+  totalCost: number
+  /** 自然月累计消费金额（元）。 */
+  monthCost: number
+}
 
 /**
  * Ask the balance API for a fresh SSO entry URL. The 401 body carries a
@@ -196,6 +209,53 @@ export async function fetchMimoBalance(cookie: string): Promise<BalanceInfo | nu
     if (m && !info.accountId) info.accountId = decodeURIComponent(m[1])
   }
   return info
+}
+
+/**
+ * 获取 MiMo 控制台的累计用量（token + 金额），给「账单」页算每天用了多少。
+ *
+ * GET /api/v1/usage（2026-11-19 实测，需要和余额相同的控制台 cookie）
+ *   { code:0, data:{
+ *       tokenUsage:{ inputToken, outputToken, cacheToken, totalToken,
+ *                    batchInputToken, batchOutputToken, batchCacheToken },
+ *       costUsage:{ totalCost:"124.71", currentMonthCost:"27.66" } } }
+ * 两个金额都是累计值（开户至今 / 自然月），所以每天的花费 = 两次累计值的差。
+ * 失败一律返回 null，调用方静默处理。
+ */
+export async function fetchMimoUsage(cookie: string): Promise<MimoUsage | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const resp = await fetch(USAGE_URL, {
+      headers: { Cookie: cookie, Accept: 'application/json' },
+      signal: controller.signal,
+    })
+    if (!resp.ok) return null
+    const body = (await resp.json()) as {
+      code?: number
+      data?: { tokenUsage?: Record<string, unknown>; costUsage?: Record<string, unknown> }
+    }
+    if (body.code !== undefined && body.code !== 0) return null
+    const tokens = body.data?.tokenUsage
+    if (!tokens) return null
+    const num = (v: unknown) => {
+      const n = Number(v)
+      return Number.isFinite(n) ? n : 0
+    }
+    const costUsage = body.data?.costUsage ?? {}
+    return {
+      totalToken: num(tokens.totalToken),
+      inputToken: num(tokens.inputToken),
+      outputToken: num(tokens.outputToken),
+      cacheToken: num(tokens.cacheToken),
+      totalCost: num(costUsage.totalCost),
+      monthCost: num(costUsage.currentMonthCost),
+    }
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /**

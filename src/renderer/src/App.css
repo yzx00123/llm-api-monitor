@@ -1849,3 +1849,84 @@ body {
   flex: 0 0 auto;
   min-width: 96px;
 }
+
+/* —— 消费账单页 —— */
+.report-page {
+  display: flex;
+  flex-direction: column;
+  padding: 24px 28px 40px;
+  max-width: 1080px;
+  width: 100%;
+  margin: 0 auto;
+}
+.report-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.report-top-left { display: flex; align-items: flex-start; gap: 14px; }
+.report-h { margin: 0; font-size: 18px; }
+.report-sub { color: var(--text-dim); font-size: 12px; margin-top: 4px; }
+.report-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.report-export-msg { font-size: 12px; color: var(--text-dim); margin-top: 8px; word-break: break-all; }
+.report-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 16px 0 4px; }
+.report-stats-tight { margin: 0; }
+.report-stats-usage { grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); margin: 0; }
+.report-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.report-stat-label { font-size: 12px; color: var(--text-dim); }
+.report-stat-value { font-size: 22px; font-weight: 650; margin-top: 6px; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.report-stat-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.report-card { padding: 14px 16px 10px; }
+.report-chart { width: 100%; height: auto; display: block; }
+.report-grid { stroke: var(--border); stroke-width: 1; }
+.report-axis-text { fill: var(--text-muted); font-size: 10px; }
+.report-line { fill: none; stroke: var(--green); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.report-dot { fill: var(--green); }
+.report-bar { fill: var(--accent); }
+.report-bar.muted { fill: var(--border); }
+.report-treemap-name { fill: #fff; font-size: 12px; font-weight: 600; }
+.report-treemap-value { fill: rgba(255, 255, 255, 0.88); font-size: 11px; }
+.report-legend { display: flex; flex-wrap: wrap; gap: 12px; padding: 10px 2px 4px; }
+.report-legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+.report-legend-item i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.report-legend-plain { border-top: 1px solid var(--border); margin-top: 10px; }
+.report-legend-item b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.report-empty { color: var(--text-dim); font-size: 13px; padding: 22px 4px; text-align: center; }
+.report-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.report-table th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.report-table td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.report-table tr:last-child td { border-bottom: none; }
+.report-num { text-align: right; font-variant-numeric: tabular-nums; }
+.report-date { font-variant-numeric: tabular-nums; color: var(--text-dim); white-space: nowrap; }
+.report-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.report-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.report-chip b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.report-note { color: var(--text-muted); font-size: 11.5px; line-height: 1.7; margin-top: 12px; }
+@media (max-width: 900px) {
+  .report-stats { grid-template-columns: repeat(2, 1fr); }
+}

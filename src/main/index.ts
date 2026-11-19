@@ -29,7 +29,10 @@ import {
   deleteCustomProvider,
   getSettings,
   updateSettings,
+  appendBalanceSample,
+  appendUsageSample,
 } from './store'
+import { buildDailyReport, buildUsageReport, buildReportCsv } from './report'
 
 // ===== 内存极限压榨：全部实测验证后保留 =====
 // 监控类应用的界面几乎全是静态卡片、低频刷新，不需要 GPU 硬件加速。
@@ -290,8 +293,32 @@ ipcMain.handle('app:exportStatusCsv', async () => {
   return { ok: true, path: result.filePath }
 })
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
+// ===== 消费账单（每日花费 / token 用量） =====
+// 数据来自本地余额账本，纯本机计算，不联网。
+
+ipcMain.handle('report:getDaily', (_event, days?: number, currency?: string) =>
+  buildDailyReport(days ?? 30, currency)
+)
+
+ipcMain.handle('report:getUsage', (_event, days?: number) => buildUsageReport(days ?? 30))
+
+ipcMain.handle('report:exportCsv', async (_event, days?: number, currency?: string) => {
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+  const saveOpts = {
+    defaultPath: `LLM-Monitor-账单_${stamp}.csv`,
+    filters: [{ name: 'CSV 文件', extensions: ['csv'] }],
+  }
+  const result = mainWindow
+    ? await dialog.showSaveDialog(mainWindow, saveOpts)
+    : await dialog.showSaveDialog(saveOpts)
+  if (result.canceled || !result.filePath) return { ok: false }
+  writeFileSync(result.filePath, buildReportCsv(days ?? 30, currency), 'utf-8')
+  return { ok: true, path: result.filePath }
+})
+
+function createWindow() {  mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 900,
@@ -853,6 +880,9 @@ app.whenReady().then(() => {
   bindStatusPush()
   // 掉线 / 余额不足 → 系统通知
   monitorEngine.setOnAlert(handleAlert)
+  // 余额 / MiMo 累计用量样本 → 本地账本（消费账单的数据源）
+  monitorEngine.setOnBalanceSample((sample) => appendBalanceSample({ ...sample, t: Date.now() }))
+  monitorEngine.setOnUsageSample((sample) => appendUsageSample({ ...sample, t: Date.now() }))
   // 系统托盘：关窗后监测继续，托盘一键唤出
   createTray()
 

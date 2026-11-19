@@ -3,10 +3,11 @@ import type { Provider, ProviderStatus } from '../preload'
 import Dashboard from './components/Dashboard'
 import KeyManager from './components/KeyManager'
 import ProviderManager from './components/ProviderManager'
+import Report from './components/Report'
 import Settings from './components/Settings'
 import './App.css'
 
-type View = 'dashboard' | 'keys' | 'providers' | 'settings'
+type View = 'dashboard' | 'keys' | 'providers' | 'report' | 'settings'
 type ThemeMode = 'light' | 'dark' | 'system'
 type StatusSnapshot = { onlineCount: number; errorCount: number; checkingCount: number; latest: Record<string, ProviderStatus> | null }
 
@@ -205,6 +206,9 @@ export default function App() {
             <button className={`nav-btn ${view === 'providers' ? 'active' : ''}`} onClick={() => setView('providers')}>
               供应商
             </button>
+            <button className={`nav-btn ${view === 'report' ? 'active' : ''}`} onClick={() => setView('report')}>
+              账单
+            </button>
             <button className={`nav-btn ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
               设置
             </button>
@@ -277,7 +281,9 @@ export default function App() {
         </div>
       </header>
 
-      <main className={`main${view === 'settings' || view === 'providers' ? ' main-wide' : ''}`}>
+      <main
+        className={`main${view === 'settings' || view === 'providers' || view === 'report' ? ' main-wide' : ''}`}
+      >
         {_viewId === 'dashboard' ? (
           <Dashboard providers={providers} keys={keys} labels={keyLabels} statuses={throttled.latest ?? EMPTY_STATUS} onCheckNow={handleCheckNow} onLabelChange={handleKeyLabelChange} monitoring={monitoring} />
         ) : _viewId === 'keys' ? (
@@ -288,6 +294,8 @@ export default function App() {
             onProvidersChange={setProviders}
             onBack={() => setView('dashboard')}
           />
+        ) : _viewId === 'report' ? (
+          <Report onBack={() => setView('dashboard')} />
         ) : (
           <Settings
             theme={theme}

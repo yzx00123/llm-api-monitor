@@ -1,6 +1,6 @@
 import { PROVIDERS, Provider } from './providers'
 import { getMimoCookie, getSettings } from './store'
-import { fetchMimoBalance } from './mimo'
+import { fetchMimoBalance, fetchMimoUsage } from './mimo'
 
 export type MonitorStatus = 'idle' | 'checking' | 'online' | 'offline' | 'error'
 
@@ -48,6 +48,30 @@ export interface MonitorConfig {
   enabled: boolean
 }
 
+/**
+ * 余额采样事件 —— 写进本地账本，用来推导每日消费（见 src/main/report.ts）。
+ * 账号级钱包（MiMo 控制台）的 keyIndex 固定为 -1，避免几个密钥各记一份
+ * 同一个钱包、把消费算成好几倍。
+ */
+export interface BalanceSampleEvent {
+  providerId: string
+  keyIndex: number
+  currency: string
+  available: number
+  accountScope?: boolean
+}
+
+/** MiMo 控制台的累计用量采样（token / 金额都是累计值）。 */
+export interface UsageSampleEvent {
+  providerId: string
+  totalToken: number
+  inputToken: number
+  outputToken: number
+  cacheToken: number
+  totalCost: number
+  monthCost: number
+}
+
 type StatusCallback = (statuses: Map<string, ProviderStatus>) => void
 
 export class MonitorEngine {
@@ -70,6 +94,11 @@ export class MonitorEngine {
   /** Last stable (non-'checking') state per statusKey — alert diffing base. */
   private stableState: Map<string, { status: MonitorStatus; broke: boolean }> = new Map()
   private onAlert: ((alert: StatusAlert) => void) | null = null
+  /** 余额 / 用量采样回调 —— 消费账单的唯一数据来源。 */
+  private onBalanceSample: ((sample: BalanceSampleEvent) => void) | null = null
+  private onUsageSample: ((sample: UsageSampleEvent) => void) | null = null
+  /** MiMo 用量是账号级的，一个节流位就够（不用按密钥算）。 */
+  private lastUsageAt: Map<string, number> = new Map()
 
   registerProviders(list: Provider[]) {
     for (const p of list) this.registry.set(p.id, p)
@@ -121,6 +150,49 @@ export class MonitorEngine {
 
   setOnAlert(cb: (alert: StatusAlert) => void) {
     this.onAlert = cb
+  }
+
+  /** 余额样本回调（账单用）。 */
+  setOnBalanceSample(cb: (sample: BalanceSampleEvent) => void) {
+    this.onBalanceSample = cb
+  }
+
+  /** MiMo 累计用量样本回调（账单 token 统计用）。 */
+  setOnUsageSample(cb: (sample: UsageSampleEvent) => void) {
+    this.onUsageSample = cb
+  }
+
+  /**
+   * 记一条余额样本。只记「有具体金额」的读数：
+   * 账号级钱包被标成「同账号」时 available 是空的，不能记；
+   * 季度 token 套餐的 currency 是 'TOKEN'，那是 token 不是钱，也不进金额账本。
+   */
+  private recordBalanceSample(status: ProviderStatus, info: BalanceInfo): void {
+    if (!this.onBalanceSample) return
+    if (info.available == null || !Number.isFinite(info.available)) return
+    if (info.currency === 'TOKEN') return
+    this.onBalanceSample({
+      providerId: status.providerId,
+      keyIndex: info.accountScope ? -1 : status.keyIndex,
+      currency: info.currency,
+      available: info.available,
+      accountScope: info.accountScope,
+    })
+  }
+
+  /** MiMo 用量采样，自带 90 秒节流；失败静默（不影响监测）。 */
+  private async sampleMimoUsage(cookie: string): Promise<void> {
+    if (!this.onUsageSample) return
+    const last = this.lastUsageAt.get('mimo') ?? 0
+    if (Date.now() - last < 90_000) return
+    this.lastUsageAt.set('mimo', Date.now())
+    try {
+      const usage = await fetchMimoUsage(cookie)
+      if (!usage) return
+      this.onUsageSample({ providerId: 'mimo', ...usage })
+    } catch {
+      // 用量采样失败不是监测错误，下一轮再试
+    }
   }
 
   getStatuses(): Map<string, ProviderStatus> {
@@ -560,6 +632,8 @@ export class MonitorEngine {
         // null after 401 means the cookie just got cleared — drop the balance;
         // null on transient network error keeps the previous value.
         this.applyBalance(statusKey, info ?? (getMimoCookie() ? undefined : null))
+        // 用量（token）是另一个接口，同一个 cookie 再拉一次；有余额才拉。
+        if (info) void this.sampleMimoUsage(cookie)
         return
       }
 
@@ -625,6 +699,7 @@ export class MonitorEngine {
       const status = this.statuses.get(statusKey)
       if (status) {
         status.balanceInfo = info
+        this.recordBalanceSample(status, info)
         this.onStatusChange?.(this.statuses)
       }
     } catch {
@@ -799,6 +874,7 @@ export class MonitorEngine {
       }
     }
     status.balanceInfo = info
+    this.recordBalanceSample(status, info)
     this.onStatusChange?.(this.statuses)
   }
 
