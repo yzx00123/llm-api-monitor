@@ -112,6 +112,10 @@ export class MonitorEngine {
   private onProbeUsage: ((usage: ProbeUsageEvent) => void) | null = null
   /** MiMo 用量是账号级的，一个节流位就够（不用按密钥算）。 */
   private lastUsageAt: Map<string, number> = new Map()
+  /** 没钱 key 的 10 秒余额轮询定时器（余额接口不消耗 token）。 */
+  private brokePollTimer: ReturnType<typeof setInterval> | null = null
+  private brokePolling = false
+  private brokeConfirmAt: Map<string, number> = new Map()
   /** console 账号名下 key 的尾 6 位（约 5 分钟缓存，用于余额归属过滤）。 */
   private mimoKeySuffixes: { at: number; list: string[] } | null = null
   private mimoKeySuffixesLoading: Promise<string[] | null> | null = null
@@ -126,6 +130,7 @@ export class MonitorEngine {
     this.statuses.delete(id)
     for (const sk of [...this.history.keys()]) if (sk.startsWith(`${id}#`)) this.history.delete(sk)
     for (const sk of [...this.stableState.keys()]) if (sk.startsWith(`${id}#`)) this.stableState.delete(sk)
+    for (const sk of [...this.brokeConfirmAt.keys()]) if (sk.startsWith(`${id}#`)) this.brokeConfirmAt.delete(sk)
     this.onStatusChange?.(this.statuses)
   }
 
@@ -250,6 +255,60 @@ export class MonitorEngine {
     return this.mimoKeySuffixesLoading
   }
 
+  /**
+   * 没钱的 key 每 10 秒轮询一次余额（余额接口不消耗 token，比等下一轮
+   * 探测快得多）；余额一变有钱就立刻用一次真探测确认恢复（60 秒冷却，
+   * 避免余额接口和探测结果不一致时反复打转）。
+   */
+  private ensureBrokePoll(): void {
+    if (!this.config.enabled || this.brokePollTimer) return
+    this.brokePollTimer = setInterval(() => {
+      void this.pollBrokeKeys()
+    }, 10_000)
+  }
+
+  private stopBrokePoll(): void {
+    if (this.brokePollTimer) {
+      clearInterval(this.brokePollTimer)
+      this.brokePollTimer = null
+    }
+    this.brokeConfirmAt.clear()
+  }
+
+  private async pollBrokeKeys(): Promise<void> {
+    if (this.brokePolling) return
+    this.brokePolling = true
+    try {
+      const broke: Array<{ providerId: string; keyIndex: number; sk: string }> = []
+      for (const [sk, st] of this.statuses) {
+        if (st.errorCode !== '余额不足，无法调用') continue
+        const idx = sk.lastIndexOf('#')
+        if (idx > 0) broke.push({ providerId: sk.slice(0, idx), keyIndex: Number(sk.slice(idx + 1)), sk })
+      }
+      if (broke.length === 0) {
+        this.stopBrokePoll()
+        return
+      }
+      console.log(`[broke-poll] ${broke.length} key(s) broke — balance refresh every 10s (no token cost)`)
+      for (const { providerId, keyIndex, sk } of broke) {
+        const provider = this.resolve(providerId)
+        const key = this.keys.get(providerId)?.[keyIndex]
+        if (!provider || !key) continue
+        await this.checkBalance(provider, key, providerId, sk)
+        const st = this.statuses.get(sk)
+        if (!st || st.errorCode !== '余额不足，无法调用') continue
+        const money = st.balanceInfo?.available ?? 0
+        const now = Date.now()
+        if (money > 0 && now - (this.brokeConfirmAt.get(sk) ?? 0) > 60_000) {
+          this.brokeConfirmAt.set(sk, now)
+          void this.checkProvider(providerId, keyIndex)
+        }
+      }
+    } finally {
+      this.brokePolling = false
+    }
+  }
+
   getStatuses(): Map<string, ProviderStatus> {
     return new Map(this.statuses)
   }
@@ -266,6 +325,7 @@ export class MonitorEngine {
       clearInterval(timer)
       this.timers.delete(id)
     }
+    this.stopBrokePoll()
   }
 
   hasKeys(providerId: string): boolean {
@@ -821,6 +881,8 @@ export class MonitorEngine {
         else if (wasDown && !isDown) this.emitAlert('recovered', status)
       }
       this.stableState.set(providerId, { status: status.status, broke })
+      // 没钱的 key 进入 10 秒余额轮询：余额接口免费不耗 token，充值后能尽快恢复。
+      if (broke) this.ensureBrokePoll()
     }
     this.onStatusChange?.(this.statuses)
   }
