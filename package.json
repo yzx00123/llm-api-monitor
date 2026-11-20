@@ -9,7 +9,9 @@
     "build": "electron-vite build && node scripts/postbuild.mjs",
     "preview": "electron-vite preview",
     "compile": "electron-vite build && electron-vite preview",
-    "dist": "electron-vite build && electron-builder --win"
+    "dist": "electron-vite build && electron-builder --win",
+    "release": "node scripts/release-github.mjs",
+    "ship": "npm run build && npm run dist && npm run release"
   },
   "dependencies": {
     "electron-store": "^8.2.0"

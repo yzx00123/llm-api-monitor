@@ -51,6 +51,19 @@ npm run build    # 构建到 out/
 > Windows 下若提示 Electron 安装不完整，删除 `node_modules/electron` 后重新 `npm install`；
 > 若 `ffmpeg.dll` 缺失，从 `%LOCALAPPDATA%\electron\Cache` 中的发行包重新解压补齐。
 
+## 发布
+
+一次完整的发版（改 `package.json` 版本 + 在下方更新日志加一节之后）：
+
+```bash
+npm run ship     # = build + dist + release
+```
+
+- `npm run dist` 生成 `release/LLM-API-Monitor-Setup-<版本>.exe`
+- `npm run release` 把安装包上传到 GitHub Releases（正文取自本文件对应版本的更新日志）
+- 只补传某个历史版本的包：`npm run release -- 1.3.7`（要求 `release/` 里已有该版本的 exe）
+- 凭据复用 git push 的凭据（Windows 凭据管理器），也可以临时用 `GITHUB_TOKEN` 环境变量覆盖
+
 ## 项目结构
 
 ```
