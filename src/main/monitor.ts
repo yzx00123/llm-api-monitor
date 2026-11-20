@@ -944,6 +944,9 @@ export class MonitorEngine {
           if (orphans.length === 1) sess = orphans[0]
         }
         if (!sess) {
+          // 已经确认没钱的 key（探测回 429 insufficient balance）：别用 null 把「没钱」
+          // 擦成「连接控制台」—— 欠费的账号再登录控制台也只是看到 0，用户不用连。
+          if (this.statuses.get(statusKey)?.errorCode === '余额不足，无法调用') return
           // 这把 key 还没连过控制台（或会话已失效被清掉）：清空余额，卡片挂「连接控制台」。
           this.applyBalance(statusKey, null)
           return

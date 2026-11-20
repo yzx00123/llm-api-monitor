@@ -98,10 +98,14 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
   const s = status
   const statusClass = s?.status ?? 'idle'
   const bal = formatBalance(s?.balanceInfo)
+  // 有的厂商（Moonshot、小米 MiMo）余额耗尽时回的是 429，而小米的余额还得登录控制台
+  // 才查得到 —— 没连控制台时卡片拿不到数字，只在 errorCode 上留下「余额不足」。这种
+  // 已知没钱的 key 也算 broke：直接显示「没钱」，别再催用户去连控制台登录。
+  const broke = bal.broke || s?.errorCode === '余额不足，无法调用'
   const hist = s?.latencyHistory ?? []
   const throttledUntil = s?.throttledUntil ?? 0
   // 欠费优先于限流：有的厂商（Moonshot）把「余额不足」也回成 429，卡片只该显示「没钱」。
-  const throttled = throttledUntil > Date.now() && !bal.broke
+  const throttled = throttledUntil > Date.now() && !broke
   const [editing, setEditing] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [showExport, setShowExport] = useState(false)
@@ -224,8 +228,11 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
             </span>
           )}
         </span>
-        {bal.broke ? (
-          <span className="box-balance box-broke" title={bal.tip || undefined}>
+        {broke ? (
+          <span
+            className="box-balance box-broke"
+            title={bal.tip || '这个账号已经没有额度了，不用再连控制台'}
+          >
             没钱
           </span>
         ) : bal.text ? (
