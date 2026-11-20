@@ -225,7 +225,9 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
           >
             {bal.text}
           </span>
-        ) : s && provider.id === 'mimo' && (s.status === 'online' || s.status === 'error') ? (
+        ) : s && provider.id === 'mimo' && s.status === 'online' ? (
+          // 欠费/异常的小米 key 不再挂「连接控制台」：连上去也只是看到 0 额度，
+          // 还容易被误读成「没登控制台才欠费」。只有在线且额度未知时才给登录入口。
           <button
             className="btn-mini"
             onClick={handleMimoConnect}
@@ -234,7 +236,7 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
           >
             {connecting ? '等待登录…' : '连接控制台'}
           </button>
-        ) : s && (s.status === 'online' || s.status === 'error') ? (
+        ) : s && provider.id !== 'mimo' && (s.status === 'online' || s.status === 'error') ? (
           <span className="box-balance box-noapi">无余额接口</span>
         ) : !monitoring && keyIndex >= 0 ? (
           <button className="btn-mini" onClick={() => onCheckNow(provider.id, keyIndex)}>检测</button>
