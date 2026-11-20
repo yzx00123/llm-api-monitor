@@ -29,6 +29,11 @@ export interface ProviderStatus {
   lastChecked: number | null
   authStatus: 'unknown' | 'valid' | 'invalid'
   balanceInfo?: BalanceInfo | null
+  /**
+   * 被厂商限流（429）后最早可以再探测的时间戳。倒计时结束前这一轮直接跳过，
+   * 既不给厂商添压，也避免把限流转成「掉线」的误报。
+   */
+  throttledUntil?: number
 }
 
 export interface BalanceInfo {
@@ -121,6 +126,8 @@ export class MonitorEngine {
   private mimoKeySuffixesLoading: Promise<string[] | null> | null = null
   /** 导入新 key 撞上在途探测时挂起的补跑标记（当前轮结束立即全量重测）。 */
   private pendingRecheck = new Set<string>()
+  /** 429 限流退避：statusKey → 最早可探测时间 / 连续被限流次数。 */
+  private throttle: Map<string, { until: number; strikes: number }> = new Map()
 
   registerProviders(list: Provider[]) {
     for (const p of list) this.registry.set(p.id, p)
@@ -426,6 +433,15 @@ export class MonitorEngine {
         const keyMask = MonitorEngine.maskKey(key)
         const prev = this.statuses.get(sk)
 
+        // 限流冷却中：这一轮不探测（避免把 429 越打越久），只把倒计时挂到卡片上。
+        const cool = this.throttle.get(sk)
+        if (cool && cool.until > Date.now()) {
+          if (prev && prev.throttledUntil !== cool.until) {
+            this.updateStatus(sk, { ...prev, throttledUntil: cool.until })
+          }
+          return
+        }
+
         this.updateStatus(sk, {
           providerId,
           keyIndex,
@@ -443,13 +459,35 @@ export class MonitorEngine {
           : Promise.resolve()
 
         try {
+          // 抖动：同账号多把 key 不要在同一毫秒一起打上游（限流多半这么来的）。
+          await new Promise((r) => setTimeout(r, this.jitterMs()))
           const probeStart = Date.now()
           const result = await this.testKey(provider, key)
           const latency = Date.now() - probeStart
 
           const before = this.statuses.get(sk)
           const outOfMoney = MonitorEngine.isOutOfMoney(result)
+          // 429 不是掉线，也不是密钥失效：退避一轮再来，别弹「掉线」通知。
+          if (!result.success && result.status === 429) {
+            const stillOnline = before?.authStatus === 'valid'
+            const until = this.noteThrottle(sk, result.retryAfterMs)
+            this.updateStatus(sk, {
+              providerId,
+              keyIndex,
+              keyMask,
+              status: stillOnline ? 'online' : 'idle',
+              latency: before?.latency ?? null,
+              latencyHistory: this.historyFor(sk),
+              errorCode: stillOnline ? '被限流，稍后自动重试' : result.error,
+              lastChecked: Date.now(),
+              authStatus: before?.authStatus ?? 'unknown',
+              balanceInfo: before?.balanceInfo ?? null,
+              throttledUntil: until,
+            })
+            return
+          }
           if (result.success) {
+            this.clearThrottle(sk)
             this.failCount.set(sk, 0)
             this.pushHistory(sk, latency)
           } else {
@@ -551,11 +589,44 @@ export class MonitorEngine {
     return /insufficient.{0,20}balance|余额不足|insufficient_quota|quota.{0,10}exceeded|credit|欠费|no.{0,10}funds/i.test(e)
   }
 
+  /** Retry-After → 毫秒（既支持秒数，也支持 HTTP 日期格式）。 */
+  static retryAfterFrom(resp: Response): number | undefined {
+    const raw = resp.headers.get('retry-after')
+    if (!raw) return undefined
+    const secs = Number(raw)
+    if (Number.isFinite(secs)) return Math.max(0, secs * 1000)
+    const at = Date.parse(raw)
+    return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined
+  }
+
+  /**
+   * 记一次限流并算出退避截止时间。优先用厂商给的 Retry-After，没给就指数退避
+   * 60s → 2m → 4m → 8m → 15m（上限 15 分钟）；成功一次即清零。
+   */
+  private noteThrottle(sk: string, retryAfterMs?: number): number {
+    const prev = this.throttle.get(sk)
+    const strikes = (prev?.strikes ?? 0) + 1
+    const fallback = Math.min(60_000 * 2 ** (strikes - 1), 15 * 60_000)
+    const wait = retryAfterMs && retryAfterMs > 0 ? retryAfterMs : fallback
+    const until = Date.now() + Math.min(Math.max(wait, 5_000), 15 * 60_000)
+    this.throttle.set(sk, { until, strikes })
+    return until
+  }
+
+  private clearThrottle(sk: string): void {
+    this.throttle.delete(sk)
+  }
+
+  /** 给每把 key 的探测加一点抖动，避免同账号多把 key 在同一毫秒排队打上游。 */
+  private jitterMs(): number {
+    return Math.floor(Math.random() * 400)
+  }
+
   private async testKey(
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number }> {
     try {
       if (provider.protocol === 'anthropic') {
         return await this.testAnthropic(provider, key, opts)
@@ -574,7 +645,7 @@ export class MonitorEngine {
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number }> {
     const url = `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 10000)
@@ -586,8 +657,11 @@ export class MonitorEngine {
 
     // 测延迟 settings drive every latency probe — not a hardcoded 'Hi'.
     const probe = getSettings()
-    const probeText = probe.probeText?.trim() || 'Hi'
-    const probeTokens = probe.probeMaxTokens > 0 ? probe.probeMaxTokens : 16
+    // 探测只为「能通」：1 token 输入 + 1 token 输出就够。以前每轮要 ~28 token
+    // （十几字的提示 + 16 token 输出），10 秒一轮 × 十几把 key 一天就是上百万
+    // token；测延迟页仍保留用户自定义的长文本，两者互不影响。
+    const probeText = 'hi'
+    const probeTokens = 1
     const probeModel = probe.probeModel?.trim() || provider.models[0] || 'gpt-4o-mini'
 
     try {
@@ -639,6 +713,8 @@ export class MonitorEngine {
         authValid: true,
         error: `HTTP ${resp.status}: ${text.slice(0, 100)}`,
         status: resp.status,
+        // 429 交给退避层处理：拿到 Retry-After 就按它等，没有就指数退避。
+        retryAfterMs: resp.status === 429 ? MonitorEngine.retryAfterFrom(resp) : undefined,
       }
     } catch (err) {
       clearTimeout(timeout)
@@ -679,7 +755,7 @@ export class MonitorEngine {
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number }> {
     const url = `${provider.baseUrl}/v1/messages`
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 10000)
@@ -690,8 +766,11 @@ export class MonitorEngine {
     }
 
     const probe = getSettings()
-    const probeText = probe.probeText?.trim() || 'Hi'
-    const probeTokens = probe.probeMaxTokens > 0 ? probe.probeMaxTokens : 16
+    // 探测只为「能通」：1 token 输入 + 1 token 输出就够。以前每轮要 ~28 token
+    // （十几字的提示 + 16 token 输出），10 秒一轮 × 十几把 key 一天就是上百万
+    // token；测延迟页仍保留用户自定义的长文本，两者互不影响。
+    const probeText = 'hi'
+    const probeTokens = 1
     const probeModel = probe.probeModel?.trim() || provider.models[0] || 'claude-haiku-4-5'
 
     try {
@@ -732,6 +811,8 @@ export class MonitorEngine {
         authValid: true,
         error: `HTTP ${resp.status}: ${text.slice(0, 100)}`,
         status: resp.status,
+        // 429 交给退避层处理：拿到 Retry-After 就按它等，没有就指数退避。
+        retryAfterMs: resp.status === 429 ? MonitorEngine.retryAfterFrom(resp) : undefined,
       }
     } catch (err) {
       clearTimeout(timeout)
@@ -746,10 +827,13 @@ export class MonitorEngine {
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number }> {
     const probe = getSettings()
-    const probeText = probe.probeText?.trim() || 'Hi'
-    const probeTokens = probe.probeMaxTokens > 0 ? probe.probeMaxTokens : 16
+    // 探测只为「能通」：1 token 输入 + 1 token 输出就够。以前每轮要 ~28 token
+    // （十几字的提示 + 16 token 输出），10 秒一轮 × 十几把 key 一天就是上百万
+    // token；测延迟页仍保留用户自定义的长文本，两者互不影响。
+    const probeText = 'hi'
+    const probeTokens = 1
     const model = probe.probeModel?.trim() || provider.models[0] || 'gemini-2.5-flash'
     const url = `${provider.baseUrl}/models/${model}:generateContent?key=${key}`
     const controller = new AbortController()
@@ -794,6 +878,8 @@ export class MonitorEngine {
         authValid: true,
         error: `HTTP ${resp.status}: ${text.slice(0, 100)}`,
         status: resp.status,
+        // 429 交给退避层处理：拿到 Retry-After 就按它等，没有就指数退避。
+        retryAfterMs: resp.status === 429 ? MonitorEngine.retryAfterFrom(resp) : undefined,
       }
     } catch (err) {
       clearTimeout(timeout)

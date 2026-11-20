@@ -133,6 +133,8 @@ export interface ProviderStatus {
   lastChecked: number | null
   authStatus: 'unknown' | 'valid' | 'invalid'
   balanceInfo?: BalanceInfo | null
+  /** 被限流（429）后最早可再探测的时间戳；倒计时结束前不探测、不误报掉线。 */
+  throttledUntil?: number
 }
 
 export interface BalanceInfo {

@@ -42,6 +42,29 @@ function maskKey(key: string): string {
   return `${key.slice(0, 6)}••••${key.slice(-4)}`
 }
 
+/**
+ * 按文件真实编码读文本。导入清单经常来自 Excel/WPS，默认存成 GBK，
+ * 而 file.text() 一律当 UTF-8 解——中文标注就会变成「灏忕背」这种乱码，
+ * 连厂商名都匹配不上。这里先认 BOM，再试严格 UTF-8，最后回退 GBK。
+ */
+async function readTextFile(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return new TextDecoder('utf-8').decode(bytes.subarray(3))
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder('utf-16le').decode(bytes.subarray(2))
+  }
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder('utf-16be').decode(bytes.subarray(2))
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return new TextDecoder('gbk').decode(bytes)
+  }
+}
+
 export default function KeyManager({ providers, keys, labels, onKeysChange }: Props) {
   const [bulkText, setBulkText] = useState('')
   const [bulkProvider, setBulkProvider] = useState('')
@@ -137,7 +160,7 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
   async function handleFileImport(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
-    const text = await file.text()
+    const text = await readTextFile(file)
     try {
       if (file.name.endsWith('.json')) {
         const data = JSON.parse(text) as Array<Record<string, string>>

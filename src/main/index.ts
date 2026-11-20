@@ -345,7 +345,8 @@ ipcMain.handle('report:exportCsv', async (_event, days?: number, currency?: stri
     ? await dialog.showSaveDialog(mainWindow, saveOpts)
     : await dialog.showSaveDialog(saveOpts)
   if (result.canceled || !result.filePath) return { ok: false }
-  writeFileSync(result.filePath, buildReportCsv(days ?? 30, currency), 'utf-8')
+  // 和状态快照一样加 BOM：否则 Excel 双击打开，中文列头与厂商名全是乱码
+  writeFileSync(result.filePath, '\uFEFF' + buildReportCsv(days ?? 30, currency), 'utf-8')
   return { ok: true, path: result.filePath }
 })
 

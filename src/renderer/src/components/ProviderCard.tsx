@@ -27,6 +27,15 @@ function latencyClass(ms: number | null | undefined): string {
   return 'bad'
 }
 
+/** 限流退避的恢复时刻 → “15:03”（倒计时会随推送跳动，显示绝对时间更稳）。 */
+function formatClock(ts: number): string {
+  return new Date(ts).toLocaleTimeString('zh-CN', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 function formatBalance(info: ProviderStatus['balanceInfo']): {
   text: string
   broke: boolean
@@ -90,6 +99,8 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
   const statusClass = s?.status ?? 'idle'
   const bal = formatBalance(s?.balanceInfo)
   const hist = s?.latencyHistory ?? []
+  const throttledUntil = s?.throttledUntil ?? 0
+  const throttled = throttledUntil > Date.now()
   const [editing, setEditing] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [showExport, setShowExport] = useState(false)
@@ -116,6 +127,7 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
   }
   const tip = [
     statusLabel(s?.status ?? null),
+    throttled ? `限流退避至 ${formatClock(throttledUntil)}` : '',
     s?.authStatus === 'valid' ? '认证 ✓' : s?.authStatus === 'invalid' ? '认证 ✗' : '',
     s?.lastChecked ? `上次 ${new Date(s.lastChecked).toLocaleTimeString('zh-CN', { hour12: false })}` : '未检测',
     s?.errorCode ?? '',
@@ -133,7 +145,7 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
         </button>
       )}
       <div className="box-top">
-        <span className={`status-dot ${statusClass}`} />
+        <span className={`status-dot ${statusClass}${throttled ? ' throttled' : ''}`} />
         {editing && fullKey ? (
           <input
             className="box-name-input"
@@ -189,8 +201,18 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
         </div>
       )}
       <div className="box-meta">
-        <span className={`box-latency ${latencyClass(s?.latency)}`}>
-          {formatLatency(s?.latency ?? null)}
+        <span className="box-left">
+          <span className={`box-latency ${latencyClass(s?.latency)}`}>
+            {formatLatency(s?.latency ?? null)}
+          </span>
+          {throttled && (
+            <span
+              className="box-balance box-throttle"
+              title={`被厂商限流（429），将于 ${new Date(throttledUntil).toLocaleTimeString('zh-CN', { hour12: false })} 自动重试`}
+            >
+              限流 {formatClock(throttledUntil)}
+            </span>
+          )}
         </span>
         {bal.broke ? (
           <span className="box-balance box-broke" title={bal.tip || undefined}>
@@ -249,6 +271,8 @@ function statusShallowEqual(
     a.errorCode === b.errorCode &&
     a.authStatus === b.authStatus &&
     a.lastChecked === b.lastChecked &&
+    // 限流退避窗口变了就要重画徽标/圆点，否则会一直显示旧的恢复时刻
+    (a.throttledUntil ?? 0) === (b.throttledUntil ?? 0) &&
     (a.latencyHistory?.join(',') ?? '') === (b.latencyHistory?.join(',') ?? '') &&
     (a.balanceInfo?.available ?? null) === (b.balanceInfo?.available ?? null) &&
     (a.balanceInfo?.accountScope ?? false) === (b.balanceInfo?.accountScope ?? false)

@@ -307,6 +307,8 @@ body {
 .status-dot.offline { background: var(--red); box-shadow: 0 0 8px var(--red); }
 .status-dot.error { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
 .status-dot.checking { background: var(--amber); animation: pulse 1.2s infinite; }
+/* 限流退避中：还是在线，只是被 429 挡了，用琥珀色缓慢呼吸区分「掉线」 */
+.status-dot.throttled { background: var(--amber); box-shadow: 0 0 8px var(--amber); animation: pulse 1.8s infinite; }
 .status-dot.blue { background: var(--blue); }
 .status-dot.green { background: var(--green); }
 .status-dot.purple { background: var(--purple); }
@@ -959,6 +961,12 @@ body {
   justify-content: space-between;
   gap: 8px;
 }
+.box-left {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
 .box-latency {
   font-size: 17px;
   font-weight: 700;
@@ -981,6 +989,14 @@ body {
 .box-balance.box-shared {
   opacity: 0.7;
   font-style: italic;
+}
+/* 429 限流退避徽标：显示恢复时刻，避免把限流误当成掉线。
+   必须写在 .box-balance 之后——两者特异性相同，靠顺序覆盖底色与字色。 */
+.box-balance.box-throttle {
+  color: var(--amber);
+  background: var(--amber-bg);
+  border-color: transparent;
+  font-variant-numeric: tabular-nums;
 }
 /* 延迟迷你曲线（每密钥最近 30 次探测） */
 .box-spark {
