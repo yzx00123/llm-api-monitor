@@ -469,6 +469,33 @@ export class MonitorEngine {
           const outOfMoney = MonitorEngine.isOutOfMoney(result)
           // 429 不是掉线，也不是密钥失效：退避一轮再来，别弹「掉线」通知。
           if (!result.success && result.status === 429) {
+            // 但有些厂商把「没钱」也回成 429（Moonshot: "suspended due to insufficient
+            // balance"）。这种要走欠费逻辑：清掉退避、10 秒轮询余额；否则一把已经欠费
+            // 的密钥会被当成限流无限退避，卡片上一直挂着「限流 HH:MM」。
+            const zeroBalance =
+              typeof before?.balanceInfo?.available === 'number' && before.balanceInfo.available <= 0
+            if (result.outOfBalance || (outOfMoney && zeroBalance)) {
+              this.clearThrottle(sk)
+              this.updateStatus(sk, {
+                providerId,
+                keyIndex,
+                keyMask,
+                status: 'error',
+                latency: before?.latency ?? null,
+                latencyHistory: this.historyFor(sk),
+                errorCode: '余额不足，无法调用',
+                lastChecked: Date.now(),
+                authStatus: before?.authStatus === 'valid' ? 'valid' : 'unknown',
+                balanceInfo: {
+                  currency: before?.balanceInfo?.currency ?? 'CNY',
+                  available: 0,
+                  accountScope: before?.balanceInfo?.accountScope,
+                  accountId: before?.balanceInfo?.accountId,
+                  raw: result.error,
+                },
+              })
+              return
+            }
             const stillOnline = before?.authStatus === 'valid'
             const until = this.noteThrottle(sk, result.retryAfterMs)
             this.updateStatus(sk, {
@@ -589,6 +616,18 @@ export class MonitorEngine {
     return /insufficient.{0,20}balance|余额不足|insufficient_quota|quota.{0,10}exceeded|credit|欠费|no.{0,10}funds/i.test(e)
   }
 
+  /**
+   * 有些厂商把「没钱」也回成 429（Moonshot 就是 429 + "suspended due to
+   * insufficient balance"）。这个判断比 isOutOfMoney 更严格，只认「余额/欠费」
+   * 字样，避免把真正的限流（如 "quota exceeded, retry later"）当成没钱。
+   */
+  static looksLikeOutOfBalance(text?: string): boolean {
+    if (!text) return false
+    return /insufficient.{0,20}(?:balance|funds?)|balance.{0,20}insufficient|余额不足|欠费|no.{0,10}funds|out of (?:balance|credit)|suspended due to|recharge (?:your|the) account/i.test(
+      text
+    )
+  }
+
   /** Retry-After → 毫秒（既支持秒数，也支持 HTTP 日期格式）。 */
   static retryAfterFrom(resp: Response): number | undefined {
     const raw = resp.headers.get('retry-after')
@@ -626,7 +665,7 @@ export class MonitorEngine {
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean }> {
     try {
       if (provider.protocol === 'anthropic') {
         return await this.testAnthropic(provider, key, opts)
@@ -645,7 +684,7 @@ export class MonitorEngine {
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean }> {
     const url = `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 10000)
@@ -711,10 +750,12 @@ export class MonitorEngine {
       return {
         success: false,
         authValid: true,
-        error: `HTTP ${resp.status}: ${text.slice(0, 100)}`,
+        error: `HTTP ${resp.status}: ${text.slice(0, resp.status === 429 ? 200 : 100)}`,
         status: resp.status,
         // 429 交给退避层处理：拿到 Retry-After 就按它等，没有就指数退避。
         retryAfterMs: resp.status === 429 ? MonitorEngine.retryAfterFrom(resp) : undefined,
+        // 有些厂商把「没钱」也回成 429（正文往往写在后半段），判断要看完整正文而不是截断后的那份。
+        outOfBalance: MonitorEngine.looksLikeOutOfBalance(text),
       }
     } catch (err) {
       clearTimeout(timeout)
@@ -755,7 +796,7 @@ export class MonitorEngine {
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean }> {
     const url = `${provider.baseUrl}/v1/messages`
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 10000)
@@ -809,10 +850,12 @@ export class MonitorEngine {
       return {
         success: false,
         authValid: true,
-        error: `HTTP ${resp.status}: ${text.slice(0, 100)}`,
+        error: `HTTP ${resp.status}: ${text.slice(0, resp.status === 429 ? 200 : 100)}`,
         status: resp.status,
         // 429 交给退避层处理：拿到 Retry-After 就按它等，没有就指数退避。
         retryAfterMs: resp.status === 429 ? MonitorEngine.retryAfterFrom(resp) : undefined,
+        // 有些厂商把「没钱」也回成 429（正文往往写在后半段），判断要看完整正文而不是截断后的那份。
+        outOfBalance: MonitorEngine.looksLikeOutOfBalance(text),
       }
     } catch (err) {
       clearTimeout(timeout)
@@ -827,7 +870,7 @@ export class MonitorEngine {
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean }> {
     const probe = getSettings()
     // 探测只为「能通」：1 token 输入 + 1 token 输出就够。以前每轮要 ~28 token
     // （十几字的提示 + 16 token 输出），10 秒一轮 × 十几把 key 一天就是上百万
@@ -876,10 +919,12 @@ export class MonitorEngine {
       return {
         success: false,
         authValid: true,
-        error: `HTTP ${resp.status}: ${text.slice(0, 100)}`,
+        error: `HTTP ${resp.status}: ${text.slice(0, resp.status === 429 ? 200 : 100)}`,
         status: resp.status,
         // 429 交给退避层处理：拿到 Retry-After 就按它等，没有就指数退避。
         retryAfterMs: resp.status === 429 ? MonitorEngine.retryAfterFrom(resp) : undefined,
+        // 有些厂商把「没钱」也回成 429（正文往往写在后半段），判断要看完整正文而不是截断后的那份。
+        outOfBalance: MonitorEngine.looksLikeOutOfBalance(text),
       }
     } catch (err) {
       clearTimeout(timeout)
@@ -1014,7 +1059,11 @@ export class MonitorEngine {
       }
       this.stableState.set(providerId, { status: status.status, broke })
       // 没钱的 key 进入 10 秒余额轮询：余额接口免费不耗 token，充值后能尽快恢复。
-      if (broke) this.ensureBrokePoll()
+      // 欠费判定优先于限流：清掉可能残留的退避窗口，卡片不再显示「限流」。
+      if (broke) {
+        this.ensureBrokePoll()
+        this.clearThrottle(providerId)
+      }
     }
     this.onStatusChange?.(this.statuses)
   }

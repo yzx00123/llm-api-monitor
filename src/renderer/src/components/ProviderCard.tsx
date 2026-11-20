@@ -100,7 +100,8 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
   const bal = formatBalance(s?.balanceInfo)
   const hist = s?.latencyHistory ?? []
   const throttledUntil = s?.throttledUntil ?? 0
-  const throttled = throttledUntil > Date.now()
+  // 欠费优先于限流：有的厂商（Moonshot）把「余额不足」也回成 429，卡片只该显示「没钱」。
+  const throttled = throttledUntil > Date.now() && !bal.broke
   const [editing, setEditing] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [showExport, setShowExport] = useState(false)
