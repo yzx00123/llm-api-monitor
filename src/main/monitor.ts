@@ -119,6 +119,8 @@ export class MonitorEngine {
   /** console 账号名下 key 的尾 6 位（约 5 分钟缓存，用于余额归属过滤）。 */
   private mimoKeySuffixes: { at: number; list: string[] } | null = null
   private mimoKeySuffixesLoading: Promise<string[] | null> | null = null
+  /** 导入新 key 撞上在途探测时挂起的补跑标记（当前轮结束立即全量重测）。 */
+  private pendingRecheck = new Set<string>()
 
   registerProviders(list: Provider[]) {
     for (const p of list) this.registry.set(p.id, p)
@@ -148,9 +150,46 @@ export class MonitorEngine {
     }
   }
 
-  setKeys(providerId: string, keys: string[]) {
+  /**
+   * Sync a provider's key list. probeNew = indexes of freshly imported keys —
+   * they get probed immediately (probeNow), not on the next polling round.
+   * Monitoring off → probe once but never start a polling timer.
+   */
+  setKeys(providerId: string, keys: string[], probeNew?: number[]) {
     this.keys.set(providerId, keys)
-    this.startProvider(providerId)
+    if (probeNew && probeNew.length > 0) {
+      if (this.config.enabled && !this.timers.has(providerId)) {
+        // Brand-new provider while monitoring is on — startProvider probes
+        // right away and starts the interval.
+        this.startProvider(providerId)
+      } else {
+        void this.probeNow(providerId, probeNew)
+      }
+      return
+    }
+    if (this.config.enabled) {
+      this.startProvider(providerId)
+    } else {
+      // Monitoring stopped: still probe once so the import gives feedback,
+      // but do not resurrect a polling timer.
+      void this.checkProvider(providerId)
+    }
+  }
+
+  /**
+   * Probe freshly imported keys right away instead of waiting for the next
+   * interval. If this provider already has a probe in flight, checkProvider's
+   * in-flight guard would silently drop the call — mark it instead and let
+   * the finally block re-run a full round the moment the current one ends.
+   */
+  private async probeNow(providerId: string, keyIndexes: number[]): Promise<void> {
+    if (this.inFlight.has(providerId)) {
+      this.pendingRecheck.add(providerId)
+      return
+    }
+    for (const keyIndex of keyIndexes) {
+      await this.checkProvider(providerId, keyIndex)
+    }
   }
 
   /** Load persisted keys without starting timers (app startup). */
@@ -162,6 +201,7 @@ export class MonitorEngine {
 
   removeKeys(providerId: string) {
     this.keys.delete(providerId)
+    this.pendingRecheck.delete(providerId)
     this.stopProvider(providerId)
   }
 
@@ -325,6 +365,7 @@ export class MonitorEngine {
       clearInterval(timer)
       this.timers.delete(id)
     }
+    this.pendingRecheck.clear()
     this.stopBrokePoll()
   }
 
@@ -481,6 +522,11 @@ export class MonitorEngine {
     } finally {
       this.inFlight.delete(providerId)
       this.runningCount--
+      // 导入新 key 撞上这一轮时挂起的补跑：当前轮结束立即全量重测，
+      // 不等下一个轮询间隔。
+      if (this.pendingRecheck.delete(providerId)) {
+        void this.checkProvider(providerId)
+      }
       // Process next queued provider if any
       if (this.queue.length > 0 && this.runningCount < this.maxConcurrent) {
         const nextId = this.queue.shift()!

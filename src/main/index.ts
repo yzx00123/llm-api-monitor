@@ -436,7 +436,10 @@ ipcMain.handle('monitor:setKeys', (_event, keys: Record<string, string[]>) => {
   const prev = getApiKeys()
   setApiKeys(keys)
   for (const [pid, ks] of Object.entries(keys)) {
-    monitorEngine.setKeys(pid, ks)
+    const prevList = prev[pid] ?? []
+    // 新导入的 key 立即探测一次，不等下一个轮询间隔。
+    const added = ks.map((k, i) => (prevList.includes(k) ? -1 : i)).filter((i) => i >= 0)
+    monitorEngine.setKeys(pid, ks, added)
   }
   // Providers whose keys were all removed must stop polling too
   for (const pid of Object.keys(prev)) {
@@ -450,7 +453,10 @@ ipcMain.handle('monitor:setKeys', (_event, keys: Record<string, string[]>) => {
 ipcMain.handle('monitor:addApiKey', (_event, providerId: string, keys: string[]) => {
   addApiKey(providerId, keys)
   const current = getApiKeys()
-  monitorEngine.setKeys(providerId, current[providerId] || [])
+  const list = current[providerId] || []
+  // 刚导入的几把 key 立即探测一次，不等下一个轮询间隔。
+  const added = list.map((k, i) => (keys.includes(k) ? i : -1)).filter((i) => i >= 0)
+  monitorEngine.setKeys(providerId, list, added)
   return true
 })
 
