@@ -13,6 +13,11 @@ interface StoreSchema {
   usageHistory: UsageSample[]
   /** Per-day token counts consumed by this app's own probes, per provider. */
   probeUsage: Record<string, Record<string, ProbeUsageDay>>
+  /**
+   * 已经弹过「余额不足」提醒的密钥（statusKey = `providerId#keyIndex`）。
+   * 持久化到配置里，重启软件也不会重复弹；充值恢复（refilled）后移除。
+   */
+  brokeAlerted: string[]
   settings: {
     intervalMs: number
     enabled: boolean
@@ -217,6 +222,7 @@ const store = new Store<StoreSchema>({
     balanceHistory: [],
     usageHistory: [],
     probeUsage: {},
+    brokeAlerted: [],
     settings: {
       intervalMs: 10000,
       enabled: false,
@@ -233,6 +239,23 @@ const store = new Store<StoreSchema>({
     },
   },
 })
+
+/** 已经弹过「余额不足」提醒的密钥 statusKey 列表（持久化，重启不重复弹）。 */
+export function getBrokeAlerted(): string[] {
+  return store.get('brokeAlerted', [])
+}
+
+/** 记住某密钥已经弹过没钱提醒（只在真正弹出通知后调用）。 */
+export function addBrokeAlerted(id: string): void {
+  const list = store.get('brokeAlerted', [])
+  if (!list.includes(id)) store.set('brokeAlerted', [...list, id])
+}
+
+/** 充值恢复（refilled）后解除记忆，下次再没钱才会重新提醒。 */
+export function clearBrokeAlerted(id: string): void {
+  const list = store.get('brokeAlerted', [])
+  if (list.includes(id)) store.set('brokeAlerted', list.filter((x) => x !== id))
+}
 
 export function getApiKeys(): Record<string, string[]> {
   return store.get('apiKeys', {})

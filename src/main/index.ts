@@ -33,6 +33,9 @@ import {
   appendUsageSample,
   appendProbeUsage,
   getProbeUsage,
+  getBrokeAlerted,
+  addBrokeAlerted,
+  clearBrokeAlerted,
 } from './store'
 import { buildDailyReport, buildUsageReport, buildReportCsv, buildTokenReport } from './report'
 
@@ -127,6 +130,10 @@ function showNotification(title: string, body: string, silent = true): void {
 /** Per alert-kind cooldown so a flapping key can't spam the notification center. */
 const alertCooldown: Map<string, number> = new Map()
 const ALERT_COOLDOWN_MS = 60_000
+/** App launch time — 启动宽限期的起点（见 handleAlert）。 */
+const appStartedAt = Date.now()
+/** 本次会话里真正播报过「掉线」的 key —— 播报过「恢复」才有效（配对）。 */
+const announcedDown: Set<string> = new Set<string>()
 
 function providerDisplayName(providerId: string): string {
   return (
@@ -138,9 +145,33 @@ function providerDisplayName(providerId: string): string {
 
 function handleAlert(alert: StatusAlert): void {
   const settings = getSettings()
+  const statusKey = `${alert.providerId}#${alert.keyIndex}`
+  console.log(`[alert] in ${alert.kind} ${statusKey}`)
+
+  // 「余额不足」只提醒一次并记住（持久化到配置，重启不再弹）；
+  // 「余额恢复」解除记忆——但只有真提醒过余额不足才提醒恢复（配对）。
+  if (alert.kind === 'broke') {
+    if (getBrokeAlerted().includes(statusKey)) return
+  } else if (alert.kind === 'refilled') {
+    const wasAnnounced = getBrokeAlerted().includes(statusKey)
+    clearBrokeAlerted(statusKey)
+    if (!wasAnnounced) return
+  }
+
   const isRecovery = alert.kind === 'recovered' || alert.kind === 'refilled'
   if (isRecovery && !settings.alertOnRecovery) return
   if (!isRecovery && !settings.alertsEnabled) return
+
+  // 启动宽限期：打开软件后的头几轮探测常赶上网络/DNS 未就绪，
+  // 期间的掉线都是抖动，不弹通知（仪表盘状态照常显示）。
+  // 宽限期 = 3 个探测周期（掉线判定所需的连续失败窗口）+ 1 分钟，上限 30 分钟。
+  if (alert.kind === 'down') {
+    const graceMs = Math.min(3 * settings.intervalMs + 60_000, 30 * 60_000)
+    if (Date.now() - appStartedAt < graceMs) return
+  }
+  // 配对：本次会话没播报过「掉线」就不播报「已恢复」——
+  // 打开软件首轮探测失败、下一轮成功产生的"假恢复"由此被挡掉。
+  if (alert.kind === 'recovered' && !announcedDown.has(statusKey)) return
 
   const throttleKey = `${alert.providerId}#${alert.keyIndex}:${alert.kind}`
   const now = Date.now()
@@ -170,7 +201,13 @@ function handleAlert(alert: StatusAlert): void {
       body = '已可以继续调用'
       break
   }
+  console.log(`[alert] show ${alert.kind} ${statusKey}`)
   showNotification(title, body, !settings.alertSound)
+
+  // 播报记账：供「掉线↔恢复」配对与「余额不足」持久记忆判断
+  if (alert.kind === 'down') announcedDown.add(statusKey)
+  else if (alert.kind === 'recovered') announcedDown.delete(statusKey)
+  else if (alert.kind === 'broke') addBrokeAlerted(statusKey)
 }
 
 // ===== 系统托盘 + 后台驻留 =====
@@ -485,15 +522,12 @@ ipcMain.handle('monitor:setInterval', (_event, intervalMs: number) => {
   return true
 })
 
-ipcMain.handle('monitor:start', (_event, providerIds: string[], intervalMs: number) => {
+ipcMain.handle('monitor:start', (_event, _providerIds: string[], intervalMs: number) => {
+  // setConfig({enabled, intervalMs}) 内部已 stopAll + startAll 启动全部有密钥的
+  // 供应商——下面的逐个 startProvider + startAll 是重复启动，会让打开/开始瞬间
+  // 背靠背跑多轮探测（第一轮的"网络未就绪失败→下一轮成功"就是弹窗的来源）。
   monitorEngine.setConfig({ enabled: true, intervalMs })
   bindStatusPush()
-  for (const id of providerIds) {
-    if (monitorEngine.hasKeys(id)) {
-      monitorEngine.startProvider(id)
-    }
-  }
-  monitorEngine.startAll()
   return true
 })
 
@@ -899,9 +933,10 @@ app.whenReady().then(() => {
   // status pushes aren't dropped while mainWindow is still null.
   const settings = getSettings()
   if (settings.autoStart && Object.keys(getApiKeys()).length > 0) {
+    // setConfig 在 enabled + intervalMs 变化时内部已 stopAll + startAll——
+    // 这里再 startAll() 是重复启动，是"一打开软件就弹两个提示"的来源之一。
     monitorEngine.setConfig({ enabled: true, intervalMs: settings.intervalMs })
     bindStatusPush()
-    monitorEngine.startAll()
   }
 
   app.on('activate', () => {
