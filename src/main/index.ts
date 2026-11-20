@@ -33,8 +33,6 @@ import {
   appendUsageSample,
   appendProbeUsage,
   getProbeUsage,
-  getBrokeAlerted,
-  addBrokeAlerted,
   clearBrokeAlerted,
 } from './store'
 import { buildDailyReport, buildUsageReport, buildReportCsv, buildTokenReport } from './report'
@@ -148,17 +146,17 @@ function handleAlert(alert: StatusAlert): void {
   const statusKey = `${alert.providerId}#${alert.keyIndex}`
   console.log(`[alert] in ${alert.kind} ${statusKey}`)
 
-  // 「余额不足」只提醒一次并记住（持久化到配置，重启不再弹）；
-  // 「余额恢复」解除记忆——但只有真提醒过余额不足才提醒恢复（配对）。
-  if (alert.kind === 'broke') {
-    if (getBrokeAlerted().includes(statusKey)) return
-  } else if (alert.kind === 'refilled') {
-    const wasAnnounced = getBrokeAlerted().includes(statusKey)
+  // 「余额不足 / 余额恢复」一律不弹通知（用户要求）：
+  // 余额状态在仪表盘卡片徽章与账单页随时可查，弹窗纯属打扰。
+  // 恢复时仍清除旧的「已提醒」记忆，避免配置里残留过期数据。
+  if (alert.kind === 'broke') return
+  if (alert.kind === 'refilled') {
     clearBrokeAlerted(statusKey)
-    if (!wasAnnounced) return
+    return
   }
 
-  const isRecovery = alert.kind === 'recovered' || alert.kind === 'refilled'
+  // 走到这里 kind 只剩 down / recovered（broke/refilled 已在上面拦截）。
+  const isRecovery = alert.kind === 'recovered'
   if (isRecovery && !settings.alertOnRecovery) return
   if (!isRecovery && !settings.alertsEnabled) return
 
@@ -192,22 +190,13 @@ function handleAlert(alert: StatusAlert): void {
       title = `✅ ${label} 已恢复`
       body = '探测恢复正常'
       break
-    case 'broke':
-      title = `💸 ${label} 余额不足`
-      body = '调用被拒：余额不足，无法调用'
-      break
-    case 'refilled':
-      title = `💰 ${label} 余额恢复`
-      body = '已可以继续调用'
-      break
   }
   console.log(`[alert] show ${alert.kind} ${statusKey}`)
   showNotification(title, body, !settings.alertSound)
 
-  // 播报记账：供「掉线↔恢复」配对与「余额不足」持久记忆判断
+  // 播报记账：供「掉线↔恢复」配对判断
   if (alert.kind === 'down') announcedDown.add(statusKey)
   else if (alert.kind === 'recovered') announcedDown.delete(statusKey)
-  else if (alert.kind === 'broke') addBrokeAlerted(statusKey)
 }
 
 // ===== 系统托盘 + 后台驻留 =====

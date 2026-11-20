@@ -344,7 +344,7 @@ export default function Settings({
 
               <h2 className="settings-section-title">告警通知</h2>
               <div className="settings-card">
-                <Row label="掉线 / 余额不足时通知" hint="连续多次探测失败才告警，排除正常波动">
+                <Row label="掉线时通知" hint="连续多次探测失败才告警，排除正常波动；余额状态看卡片与账单页，不再弹窗">
                   <Toggle
                     checked={extra.alertsEnabled}
                     onChange={(v) => patchExtra({ alertsEnabled: v })}
@@ -409,8 +409,8 @@ export default function Settings({
                     <b>看状态、等通知</b>
                     <p>
                       仪表盘每个小卡片代表一个密钥：圆点是状态（绿=在线、红=异常、灰=未检测），
-                      数字是延迟，小曲线是最近 30 次的延迟走势。有密钥掉线或余额不足时，
-                      右下角会弹系统通知提醒你，不用一直盯着窗口。
+                      数字是延迟，小曲线是最近 30 次的延迟走势。有密钥掉线时，
+                      右下角会弹系统通知提醒你，不用一直盯着窗口；余额不足只在卡片和账单页显示，不弹窗。
                     </p>
                   </div>
                 </div>
