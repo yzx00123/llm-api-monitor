@@ -130,12 +130,21 @@ async function main() {
 
   const entries = []
   for (const file of changed) {
-    const content = readFileSync(path.join(ROOT, ...file.split('/')))
+    // 内容必须取自 git 对象库（已提交的 blob），不能读工作区文件：core.autocrlf=true
+    // 时工作区是 CRLF、提交里是 LF，直接读文件会算出不同的 blob sha，tree 就对不上。
+    const blobSha = git(['rev-parse', `HEAD:${file}`]).trim()
+    const content = execFileSync(GIT, ['cat-file', 'blob', blobSha], {
+      cwd: ROOT,
+      maxBuffer: 64 * 1024 * 1024,
+    })
     const mode = git(['ls-tree', 'HEAD', '--', file]).slice(0, 6).trim() || '100644'
     const blob = await call('POST', `${REPO}/git/blobs`, {
       content: content.toString('base64'),
       encoding: 'base64',
     })
+    if (blob.sha !== blobSha) {
+      throw new Error(`${file} 的 blob 对不上（远端 ${blob.sha} / 本地 ${blobSha}）`)
+    }
     entries.push({ path: file, mode, type: 'blob', sha: blob.sha })
   }
 
