@@ -63,6 +63,10 @@ npm run ship     # = build + dist + release
 - `npm run release` 把安装包上传到 GitHub Releases（正文取自本文件对应版本的更新日志）
 - 只补传某个历史版本的包：`npm run release -- 1.3.7`（要求 `release/` 里已有该版本的 exe）
 - 凭据复用 git push 的凭据（Windows 凭据管理器），也可以临时用 `GITHUB_TOKEN` 环境变量覆盖
+- 代码推送：平时 `git push`；如果连不上 `github.com:443`（`Recv failure: Connection was reset` /
+  `Failed to connect to github.com:443`）而 `api.github.com` 仍然通，可以用
+  `npm run push:api` 走 GitHub API 推送当前 HEAD——它会复刻本地提交的全部字段，
+  远端 commit sha 与本地完全一致，网络恢复后不会出现分叉。加 `-- --dry-run` 可以先演练。
 
 ## 项目结构
 

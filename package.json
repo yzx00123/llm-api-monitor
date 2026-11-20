@@ -11,6 +11,7 @@
     "compile": "electron-vite build && electron-vite preview",
     "dist": "electron-vite build && electron-builder --win",
     "release": "node scripts/release-github.mjs",
+    "push:api": "node scripts/push-via-api.mjs",
     "ship": "npm run build && npm run dist && npm run release"
   },
   "dependencies": {
