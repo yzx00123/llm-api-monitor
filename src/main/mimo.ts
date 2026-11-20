@@ -26,6 +26,7 @@ import type { BalanceInfo } from './monitor'
 const CONSOLE_URL = 'https://platform.xiaomimimo.com/console'
 const BALANCE_URL = 'https://platform.xiaomimimo.com/api/v1/balance'
 const USAGE_URL = 'https://platform.xiaomimimo.com/api/v1/usage'
+const APIKEYS_URL = 'https://platform.xiaomimimo.com/api/v1/apiKeys'
 const COOKIE_NAMES = new Set(['api-platform_serviceToken', 'userId'])
 const POLL_MS = 800
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
@@ -251,6 +252,46 @@ export async function fetchMimoUsage(cookie: string): Promise<MimoUsage | null> 
       totalCost: num(costUsage.totalCost),
       monthCost: num(costUsage.currentMonthCost),
     }
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * console 账号名下 key 的尾 6 位列表，用于余额归属判断：
+ * 只有列在这个账号里的 key 才配显示这个账号的钱包余额（否则会被误标「同账号」）。
+ *
+ * GET /api/v1/apiKeys（2026-11-20 实测，同一个控制台 cookie）
+ *   { code:0, data:[{ id, apiKeyName, redactedApiKey, createTime,
+ *                    lastUsedTime, deleted }] }
+ * redactedApiKey 形如 `sk-c4rk72****…****lkv4q2`（中间打码），尾 6 位足够
+ * 和配置里的 key 对上（同一控制台尾 6 位不重复）。
+ * 失败一律返回 null —— 调用方退回旧行为（照旧摊派余额）。
+ */
+export async function fetchMimoKeyList(cookie: string): Promise<string[] | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const resp = await fetch(APIKEYS_URL, {
+      headers: { Cookie: cookie, Accept: 'application/json' },
+      signal: controller.signal,
+    })
+    if (!resp.ok) return null
+    const body = (await resp.json()) as {
+      code?: number
+      data?: Array<{ redactedApiKey?: string; deleted?: boolean }>
+    }
+    if (body.code !== undefined && body.code !== 0) return null
+    if (!Array.isArray(body.data)) return null
+    const out: string[] = []
+    for (const item of body.data) {
+      const r = item.redactedApiKey
+      if (item.deleted || typeof r !== 'string' || r.length < 6) continue
+      out.push(r.slice(-6))
+    }
+    return out
   } catch {
     return null
   } finally {

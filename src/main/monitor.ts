@@ -1,6 +1,6 @@
 import { PROVIDERS, Provider } from './providers'
 import { getMimoCookie, getSettings } from './store'
-import { fetchMimoBalance, fetchMimoUsage } from './mimo'
+import { fetchMimoBalance, fetchMimoKeyList, fetchMimoUsage } from './mimo'
 
 export type MonitorStatus = 'idle' | 'checking' | 'online' | 'offline' | 'error'
 
@@ -112,6 +112,9 @@ export class MonitorEngine {
   private onProbeUsage: ((usage: ProbeUsageEvent) => void) | null = null
   /** MiMo 用量是账号级的，一个节流位就够（不用按密钥算）。 */
   private lastUsageAt: Map<string, number> = new Map()
+  /** console 账号名下 key 的尾 6 位（约 5 分钟缓存，用于余额归属过滤）。 */
+  private mimoKeySuffixes: { at: number; list: string[] } | null = null
+  private mimoKeySuffixesLoading: Promise<string[] | null> | null = null
 
   registerProviders(list: Provider[]) {
     for (const p of list) this.registry.set(p.id, p)
@@ -224,6 +227,27 @@ export class MonitorEngine {
     } catch {
       // 用量采样失败不是监测错误，下一轮再试
     }
+  }
+
+  /**
+   * console 账号名下 key 的尾 6 位列表（约 5 分钟缓存，并发探测共享同一个
+   * 在途请求）。拿不到返回 null —— 调用方退回旧行为（照旧摊派余额）。
+   */
+  private async getMimoKeySuffixes(cookie: string): Promise<string[] | null> {
+    const now = Date.now()
+    if (this.mimoKeySuffixes && now - this.mimoKeySuffixes.at < 5 * 60 * 1000) {
+      return this.mimoKeySuffixes.list
+    }
+    if (this.mimoKeySuffixesLoading) return this.mimoKeySuffixesLoading
+    this.mimoKeySuffixesLoading = fetchMimoKeyList(cookie)
+      .then((list) => {
+        if (list) this.mimoKeySuffixes = { at: Date.now(), list }
+        return list ?? this.mimoKeySuffixes?.list ?? null
+      })
+      .finally(() => {
+        this.mimoKeySuffixesLoading = null
+      })
+    return this.mimoKeySuffixesLoading
   }
 
   getStatuses(): Map<string, ProviderStatus> {
@@ -690,6 +714,16 @@ export class MonitorEngine {
         const info = await fetchMimoBalance(cookie)
         // null after 401 means the cookie just got cleared — drop the balance;
         // null on transient network error keeps the previous value.
+        // 归属过滤：key 列表（约 5 分钟缓存）拿得到时，只有 cookie 账号名下
+        // 的 key 才显示账号余额；别家账号的 key 直接清掉余额，避免被误标
+        // 「同账号」（用户可能有多把 key 分属不同账号）。
+        if (info?.accountScope) {
+          const suffixes = await this.getMimoKeySuffixes(cookie)
+          if (suffixes && !suffixes.includes(key.slice(-6))) {
+            this.applyBalance(statusKey, null)
+            return
+          }
+        }
         this.applyBalance(statusKey, info ?? (getMimoCookie() ? undefined : null))
         // 用量（token）是另一个接口，同一个 cookie 再拉一次；有余额才拉。
         if (info) void this.sampleMimoUsage(cookie)
