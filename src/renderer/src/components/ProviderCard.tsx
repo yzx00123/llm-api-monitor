@@ -119,9 +119,18 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
   }
 
   const handleMimoConnect = async () => {
+    if (!fullKey) return
     setConnecting(true)
     try {
-      await window.electronAPI.mimoConnect()
+      // 传这把密钥的尾 6 位：控制台按「小米账号」登录，一个小米账号一条会话，
+      // 想连 7001 的账号就点 7001 的按钮，不会被自动登回 7002 的账号。
+      const res = await window.electronAPI.mimoConnect(fullKey.slice(-6))
+      if (res?.ok && res.keyFound === false) {
+        window.alert(
+          `刚登录的小米账号（${res.accountId ?? '未知'}）名下没有这把密钥（…${fullKey.slice(-6)}）。\n` +
+            '说明登错账号了：请再点一次这一张卡片的「连接控制台」，登录它所属的那个小米账号。'
+        )
+      }
     } finally {
       setConnecting(false)
     }
@@ -226,14 +235,14 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
           >
             {bal.text}
           </span>
-        ) : s && provider.id === 'mimo' && s.status === 'online' ? (
-          // 欠费/异常的小米 key 不再挂「连接控制台」：连上去也只是看到 0 额度，
-          // 还容易被误读成「没登控制台才欠费」。只有在线且额度未知时才给登录入口。
+        ) : s && provider.id === 'mimo' ? (
+          // 小米的余额属于控制台账号，而不是 sk- 密钥：这把 key 还没连过它所属的
+          // 账号（拿不到余额）时才给登录入口。连上之后显示的是「它自己账号」的钱包。
           <button
             className="btn-mini"
             onClick={handleMimoConnect}
             disabled={connecting}
-            title="登录小米控制台以获取配额"
+            title="登录这把密钥所属的小米账号（每个账号单独登录，余额互不串号）"
           >
             {connecting ? '等待登录…' : '连接控制台'}
           </button>

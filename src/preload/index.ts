@@ -23,7 +23,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   importCustom: (entries: Array<{ baseUrl: string; key: string }>) =>
     ipcRenderer.invoke('monitor:importCustom', entries),
   detectKey: (key: string) => ipcRenderer.invoke('monitor:detectKey', key),
-  mimoConnect: () => ipcRenderer.invoke('monitor:mimoConnect'),
+  mimoConnect: (keySuffix?: string) => ipcRenderer.invoke('monitor:mimoConnect', keySuffix),
   latencyTest: (opts: {
     providerId: string
     key: string

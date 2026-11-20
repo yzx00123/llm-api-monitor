@@ -1,11 +1,34 @@
 import Store from 'electron-store'
 
+/**
+ * MiMo 控制台会话：一个小米账号一条。
+ *
+ * 余额是「控制台账号」级的，不是 sk- 密钥级的 —— 同账号的多把 key 共用一份钱包，
+ * 不同账号各是各的。老版本只存了一条全局 mimoCookie，哪个账号后登录就全摊哪个
+ * 账号的钱（用户实测：连了 7002 的账号，7001 的卡片也显示 7002 的余额）。改成按
+ * 账号存会话后，每把 key 用它自己账号的 cookie 查余额，互不串号。
+ */
+export interface MimoSession {
+  /** 控制台 userId（cookie 里的 userId）—— 同一个小米账号只有一条。 */
+  accountId: string
+  /** 该账号名下密钥的尾 6 位（来自控制台 GET /api/v1/apiKeys）。 */
+  keySuffixes: string[]
+  /** 控制台会话 cookie：api-platform_serviceToken=…; userId=… */
+  cookie: string
+  /** 最后绑定 / 验证时间。 */
+  updatedAt: number
+  /** 用户是从哪把密钥的卡片点「连接控制台」建立这条会话的（尾 6 位）。 */
+  boundBy?: string
+}
+
 interface StoreSchema {
   apiKeys: Record<string, string[]>
   /** Full key -> custom display name (e.g. "公司号"). Survives reordering. */
   keyLabels: Record<string, string>
-  /** MiMo console session cookie (api-platform_serviceToken=...; userId=...). */
+  /** 老版本遗留的单条 MiMo cookie，仅用于迁移（见 migrateMimoSessions）。 */
   mimoCookie: string
+  /** MiMo 控制台会话，按小米账号隔离，多个账号可以同时存在。 */
+  mimoSessions: MimoSession[]
   customProviders: CustomProvider[]
   /** Wallet readings, used to build the daily spending report (账单). */
   balanceHistory: BalanceSample[]
@@ -218,6 +241,7 @@ const store = new Store<StoreSchema>({
     apiKeys: {},
     keyLabels: {},
     mimoCookie: '',
+    mimoSessions: [],
     customProviders: [],
     balanceHistory: [],
     usageHistory: [],
@@ -282,6 +306,53 @@ export function getMimoCookie(): string {
 
 export function setMimoCookie(cookie: string): void {
   store.set('mimoCookie', cookie)
+}
+
+/** 所有已连接的控制台账号（含各自 cookie 与名下密钥尾号）。 */
+export function getMimoSessions(): MimoSession[] {
+  return store.get('mimoSessions', [])
+}
+
+/** 按 accountId 写入会话：同一个小米账号只有一条，多个账号可并存。 */
+export function saveMimoSession(session: MimoSession): void {
+  const list = store.get('mimoSessions', [])
+  const idx = list.findIndex((s) => s.accountId === session.accountId)
+  if (idx === -1) list.push(session)
+  else list[idx] = { ...list[idx], ...session }
+  store.set('mimoSessions', list)
+}
+
+export function removeMimoSession(accountId: string): void {
+  const list = store.get('mimoSessions', [])
+  const next = list.filter((s) => s.accountId !== accountId)
+  if (next.length !== list.length) store.set('mimoSessions', next)
+}
+
+/**
+ * 这把密钥（尾 6 位）属于哪个控制台账号。
+ * 先按账号名下的 key 尾号匹配；老版本迁移过来的会话没有列表，退回用 boundBy。
+ */
+export function findMimoSessionBySuffix(suffix: string): MimoSession | undefined {
+  const list = getMimoSessions()
+  return (
+    list.find((s) => s.keySuffixes.includes(suffix)) ??
+    list.find((s) => s.boundBy === suffix && s.keySuffixes.length === 0)
+  )
+}
+
+/**
+ * 老版本只存一条全局 mimoCookie。升级后把它迁成一条会话，否则老用户「明明连过
+ * 控制台却突然要重新登录」。账号名下的 key 尾号等第一次查余额时再补拉。
+ */
+export function migrateMimoSessions(): void {
+  const legacy = store.get('mimoCookie', '')
+  if (!legacy || store.get('mimoSessions', []).length > 0) return
+  const m = /(?:^|;\s*)userId=([^;]+)/.exec(legacy)
+  const accountId = m ? decodeURIComponent(m[1]) : `legacy-${Date.now()}`
+  store.set('mimoSessions', [
+    { accountId, cookie: legacy, keySuffixes: [], updatedAt: Date.now() },
+  ])
+  store.set('mimoCookie', '')
 }
 
 export function addApiKey(providerId: string, keys: string[]): void {

@@ -1,5 +1,12 @@
 import { BrowserWindow, session } from 'electron'
-import { getMimoCookie, setMimoCookie } from './store'
+import type { Session } from 'electron'
+import {
+  findMimoSessionBySuffix,
+  getMimoSessions,
+  removeMimoSession,
+  saveMimoSession,
+  type MimoSession,
+} from './store'
 import type { BalanceInfo } from './monitor'
 
 /**
@@ -24,9 +31,16 @@ import type { BalanceInfo } from './monitor'
  */
 
 const CONSOLE_URL = 'https://platform.xiaomimimo.com/console'
-const BALANCE_URL = 'https://platform.xiaomimimo.com/api/v1/balance'
-const USAGE_URL = 'https://platform.xiaomimimo.com/api/v1/usage'
-const APIKEYS_URL = 'https://platform.xiaomimimo.com/api/v1/apiKeys'
+/**
+ * 控制台接口地址。默认走官方域名；MIMO_*_URL 只是给自动化测试留的后门 —— 指到
+ * 本地假控制台，就能在不碰真实小米账号的前提下验证「按账号隔离余额」的逻辑。
+ */
+const BALANCE_URL =
+  process.env.MIMO_BALANCE_URL?.trim() || 'https://platform.xiaomimimo.com/api/v1/balance'
+const USAGE_URL =
+  process.env.MIMO_USAGE_URL?.trim() || 'https://platform.xiaomimimo.com/api/v1/usage'
+const APIKEYS_URL =
+  process.env.MIMO_APIKEYS_URL?.trim() || 'https://platform.xiaomimimo.com/api/v1/apiKeys'
 const COOKIE_NAMES = new Set(['api-platform_serviceToken', 'userId'])
 const POLL_MS = 800
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
@@ -79,8 +93,8 @@ async function getSsoLoginUrl(): Promise<string> {
  * serviceToken + one userId, preferring the host-only platform domain and
  * the most recently updated row.
  */
-async function readSessionCookie(): Promise<string> {
-  const cookies = await session.defaultSession.cookies.get({})
+async function readSessionCookie(sess: Session): Promise<string> {
+  const cookies = await sess.cookies.get({})
   const pool = cookies.filter(
     (c) => COOKIE_NAMES.has(c.name) && (c.domain ?? '').includes('xiaomimimo')
   )
@@ -107,16 +121,16 @@ async function readSessionCookie(): Promise<string> {
   return parts.join('; ')
 }
 
-async function clearSessionCookies(): Promise<void> {
-  const cookies = await session.defaultSession.cookies.get({})
+async function clearSessionCookies(sess: Session): Promise<void> {
+  const cookies = await sess.cookies.get({})
   for (const c of cookies) {
     const domain = c.domain ?? ''
     if (COOKIE_NAMES.has(c.name) && domain.includes('xiaomimimo')) {
       const host = domain.replace(/^\./, '')
       // Remove every path variant, not just the default path.
-      await session.defaultSession.cookies.remove(`https://${host}`, c.name)
+      await sess.cookies.remove(`https://${host}`, c.name)
       if (c.path && c.path !== '/') {
-        await session.defaultSession.cookies.remove(`https://${host}${c.path}`, c.name)
+        await sess.cookies.remove(`https://${host}${c.path}`, c.name)
       }
     }
   }
@@ -193,23 +207,24 @@ function parseMimoBalance(data: unknown): BalanceInfo | null {
 }
 
 /**
- * Fetch balance with the persisted cookie. On 401/403 the cookie is expired:
- * clear it so the UI falls back to the connect button.
+ * Fetch balance with one account's persisted cookie.
+ *
+ * Returns the HTTP status too, so the caller can tell "这个会话过期了" (401/403 →
+ * 删掉该账号的会话，卡片回到「连接控制台」) from "只是网络抖了一下" (status 0 →
+ * 保留上一次读数，别把余额擦掉)。会话清理交给调用方按账号做。
  */
-export async function fetchMimoBalance(cookie: string): Promise<BalanceInfo | null> {
+export async function fetchMimoBalance(
+  cookie: string
+): Promise<{ info: BalanceInfo | null; status: number }> {
   const { status, data } = await requestBalance(cookie)
-  if (status === 401 || status === 403) {
-    setMimoCookie('')
-    return null
-  }
-  if (!data) return null
+  if (!data) return { info: null, status }
   const info = parseMimoBalance(data)
   if (info) {
     // Persist which account this wallet belongs to (userId from the cookie).
     const m = /(?:^|;\s*)userId=([^;]+)/.exec(cookie)
     if (m && !info.accountId) info.accountId = decodeURIComponent(m[1])
   }
-  return info
+  return { info, status }
 }
 
 /**
@@ -300,27 +315,94 @@ export async function fetchMimoKeyList(cookie: string): Promise<string[] | null>
 }
 
 /**
- * Acquire the MiMo console cookie.
- *
- * 1. Already have a valid cookie → resolve true instantly, no window.
- * 2. Otherwise open a window at the DOMESTIC Xiaomi SSO entry (fast, zh).
- * 3. When the cookie lands AND the balance API accepts it → jump the window
- *    to the console (token-plan) and keep it open; resolve true so the main
- *    window can paint the quota. User closes the console window at will.
- * 4. Window closed before login / 5 min timeout → resolve false.
+ * 登录窗口专用的独立分区：每次点「连接控制台」都从干净的 cookie 环境开始。
+ * 用默认分区的话，上一次登录留下的 SSO cookie 会让小米直接把你登回老账号 ——
+ * 用户实测的「想连 7001 的账号，结果又给我连到 7002」就是这么来的。
  */
-export async function openMimoLoginWindow(parent: BrowserWindow | null): Promise<boolean> {
-  // Fast path: cookie still valid from a previous login
-  const existing = await readSessionCookie()
-  if (existing) {
-    const { status } = await requestBalance(existing)
-    if (status === 200) return true
-    if (status === 401 || status === 403) await clearSessionCookies()
+const LOGIN_PARTITION = 'mimo-console-login'
+
+/** 从 cookie 里解析控制台账号 id（userId）。 */
+function accountIdFromCookie(cookie: string): string {
+  const m = /(?:^|;\s*)userId=([^;]+)/.exec(cookie)
+  if (m) {
+    try {
+      return decodeURIComponent(m[1])
+    } catch {
+      return m[1]
+    }
+  }
+  // 没有 userId 时用 cookie 哈希兜底，至少保证同一个账号每次都落到同一条会话。
+  let hash = 0
+  for (let i = 0; i < cookie.length; i++) hash = (hash * 31 + cookie.charCodeAt(i)) | 0
+  return `anon-${Math.abs(hash).toString(16)}`
+}
+
+export interface MimoConnectResult {
+  ok: boolean
+  /** 登录成功后拿到的控制台账号 id。 */
+  accountId?: string
+  /** 该账号名下的密钥尾 6 位列表（接口失败时为 null）。 */
+  keySuffixes?: string[] | null
+  /** 用户点「连接控制台」的那把 key 是否属于这个账号；false = 登错号了。 */
+  keyFound?: boolean
+  error?: string
+}
+
+/** 把刚拿到的控制台 cookie 存成一条账号会话（顺便拉一次该账号的 key 尾号列表）。 */
+async function persistSession(cookie: string, boundBy?: string): Promise<MimoSession> {
+  const accountId = accountIdFromCookie(cookie)
+  const existing = getMimoSessions().find((s) => s.accountId === accountId)
+  const list = await fetchMimoKeyList(cookie)
+  const keySuffixes = list && list.length > 0 ? list : (existing?.keySuffixes ?? [])
+  const sess: MimoSession = {
+    accountId,
+    cookie,
+    keySuffixes,
+    updatedAt: Date.now(),
+    boundBy: boundBy ?? existing?.boundBy,
+  }
+  saveMimoSession(sess)
+  return sess
+}
+
+/**
+ * Acquire a MiMo console account session — 一个账号一次登录，多个账号各自一条会话。
+ *
+ * 1. 点「连接控制台」的那把 key 所属账号已连过且 cookie 还有效 → 直接返回，不弹窗。
+ * 2. 否则在**独立分区**里打开国内 SSO 登录页（每次都清空该分区 cookie），保证能
+ *    登另一个账号，而不是被自动登回上一个账号。
+ * 3. cookie 落地且余额接口返回 200 → 关闭窗口、按 userId 存会话，并告诉界面这把
+ *    key 是否真属于该账号（登错号时界面提示用户）。
+ * 4. 窗口提前关闭 / 5 分钟超时 → ok:false。
+ */
+export async function openMimoLoginWindow(
+  parent: BrowserWindow | null,
+  opts: { keySuffix?: string } = {}
+): Promise<MimoConnectResult> {
+  const { keySuffix } = opts
+
+  // 这把 key 所属账号已经连过、会话还有效：不用再登录。
+  if (keySuffix) {
+    const existing = findMimoSessionBySuffix(keySuffix)
+    if (existing) {
+      const { status } = await requestBalance(existing.cookie)
+      if (status === 200) {
+        return {
+          ok: true,
+          accountId: existing.accountId,
+          keySuffixes: existing.keySuffixes,
+          keyFound: true,
+        }
+      }
+      if (status === 401 || status === 403) removeMimoSession(existing.accountId)
+    }
   }
 
+  const loginSession = session.fromPartition(LOGIN_PARTITION)
+  await clearSessionCookies(loginSession)
   const startUrl = await getSsoLoginUrl()
 
-  return new Promise((resolve) => {
+  return new Promise<MimoConnectResult>((resolve) => {
     let settled = false
     let pollTimer: NodeJS.Timeout | null = null
     let timeoutTimer: NodeJS.Timeout | null = null
@@ -331,6 +413,7 @@ export async function openMimoLoginWindow(parent: BrowserWindow | null): Promise
       parent: parent ?? undefined,
       title: '登录小米 MiMo 控制台',
       autoHideMenuBar: true,
+      webPreferences: { session: loginSession },
     })
 
     const stopTimers = () => {
@@ -340,53 +423,53 @@ export async function openMimoLoginWindow(parent: BrowserWindow | null): Promise
       timeoutTimer = null
     }
 
-    /** Failure: close the window and resolve false. */
-    const fail = () => {
-      if (settled) return
-      settled = true
-      stopTimers()
+    const closeWindow = () => {
       try {
         if (!win.isDestroyed()) win.close()
       } catch {
         // window already gone
       }
-      resolve(false)
     }
 
-    /** Success: close the login window immediately — cookie is already saved. */
-    const succeed = () => {
+    /** Failure: close the window and resolve ok:false. */
+    const fail = (error?: string) => {
       if (settled) return
       settled = true
       stopTimers()
-      try {
-        if (!win.isDestroyed()) win.close()
-      } catch {
-        // window already gone
-      }
-      resolve(true)
+      closeWindow()
+      resolve({ ok: false, error })
+    }
+
+    /** Success: cookie landed → persist this account's session → close window. */
+    const succeed = (cookie: string) => {
+      if (settled) return
+      settled = true
+      stopTimers()
+      closeWindow()
+      void persistSession(cookie, keySuffix)
+        .then((sess) => {
+          const keyFound = !keySuffix ? true : sess.keySuffixes.includes(keySuffix)
+          resolve({ ok: true, accountId: sess.accountId, keySuffixes: sess.keySuffixes, keyFound })
+        })
+        .catch((err: unknown) => resolve({ ok: false, error: String(err) }))
     }
 
     pollTimer = setInterval(() => {
       void (async () => {
         try {
-          const cookie = await readSessionCookie()
+          const cookie = await readSessionCookie(loginSession)
           if (!cookie) return
           const { status } = await requestBalance(cookie)
-          if (status === 200) {
-            setMimoCookie(cookie)
-            succeed()
-          } else if (status === 401 || status === 403) {
-            // Expired cookies still in the jar — drop them and wait for re-login.
-            await clearSessionCookies()
-          }
+          if (status === 200) succeed(cookie)
+          else if (status === 401 || status === 403) await clearSessionCookies(loginSession)
         } catch {
           // keep polling until timeout
         }
       })()
     }, POLL_MS)
 
-    timeoutTimer = setTimeout(fail, LOGIN_TIMEOUT_MS)
-    win.on('closed', () => fail())
+    timeoutTimer = setTimeout(() => fail('登录超时'), LOGIN_TIMEOUT_MS)
+    win.on('closed', () => fail('登录窗口已关闭'))
     void win.loadURL(startUrl)
   })
 }

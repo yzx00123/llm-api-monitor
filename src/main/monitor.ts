@@ -1,5 +1,11 @@
 import { PROVIDERS, Provider } from './providers'
-import { getMimoCookie, getSettings } from './store'
+import {
+  findMimoSessionBySuffix,
+  getMimoSessions,
+  getSettings,
+  removeMimoSession,
+  saveMimoSession,
+} from './store'
 import { fetchMimoBalance, fetchMimoKeyList, fetchMimoUsage } from './mimo'
 
 export type MonitorStatus = 'idle' | 'checking' | 'online' | 'offline' | 'error'
@@ -121,9 +127,11 @@ export class MonitorEngine {
   private brokePollTimer: ReturnType<typeof setInterval> | null = null
   private brokePolling = false
   private brokeConfirmAt: Map<string, number> = new Map()
-  /** console 账号名下 key 的尾 6 位（约 5 分钟缓存，用于余额归属过滤）。 */
-  private mimoKeySuffixes: { at: number; list: string[] } | null = null
-  private mimoKeySuffixesLoading: Promise<string[] | null> | null = null
+  /**
+   * MiMo 余额是账号级的：同一账号下多把 key 只该打一次接口，这里按 accountId
+   * 缓存 60 秒（不同账号互不影响）。
+   */
+  private mimoAccountCache: Map<string, { at: number; info: BalanceInfo | null }> = new Map()
   /** 导入新 key 撞上在途探测时挂起的补跑标记（当前轮结束立即全量重测）。 */
   private pendingRecheck = new Set<string>()
   /** 429 限流退避：statusKey → 最早可探测时间 / 连续被限流次数。 */
@@ -279,27 +287,6 @@ export class MonitorEngine {
     } catch {
       // 用量采样失败不是监测错误，下一轮再试
     }
-  }
-
-  /**
-   * console 账号名下 key 的尾 6 位列表（约 5 分钟缓存，并发探测共享同一个
-   * 在途请求）。拿不到返回 null —— 调用方退回旧行为（照旧摊派余额）。
-   */
-  private async getMimoKeySuffixes(cookie: string): Promise<string[] | null> {
-    const now = Date.now()
-    if (this.mimoKeySuffixes && now - this.mimoKeySuffixes.at < 5 * 60 * 1000) {
-      return this.mimoKeySuffixes.list
-    }
-    if (this.mimoKeySuffixesLoading) return this.mimoKeySuffixesLoading
-    this.mimoKeySuffixesLoading = fetchMimoKeyList(cookie)
-      .then((list) => {
-        if (list) this.mimoKeySuffixes = { at: Date.now(), list }
-        return list ?? this.mimoKeySuffixes?.list ?? null
-      })
-      .finally(() => {
-        this.mimoKeySuffixesLoading = null
-      })
-    return this.mimoKeySuffixesLoading
   }
 
   /**
@@ -942,28 +929,58 @@ export class MonitorEngine {
       // MiMo: balance needs the console session cookie, not the sk- key
       // (see src/main/mimo.ts). Cookie missing/expired → clear balance so the
       // UI can offer the connect button.
+      // MiMo：余额属于「控制台账号」而不是 sk- 密钥。先按 key 尾号找到它所属的
+      // 账号会话，再用那条会话自己的 cookie 去查 —— 不同小米账号各有各的钱包，
+      // 7002 账号的钱不会再被摊到 7001 的卡片上（用户实测的串号问题）。
       if (providerId === 'mimo') {
-        const cookie = getMimoCookie()
-        if (!cookie) {
+        const suffix = key.slice(-6)
+        let sess = findMimoSessionBySuffix(suffix)
+        if (!sess) {
+          // 老版本只存了一条全局 cookie，迁移过来的会话还不知道名下有哪些 key
+          //（keySuffixes 为空）。应用里只有这一个账号时，就当它是这把 key 的账号 ——
+          // 下面查到余额后会补拉 key 列表落库，之后就能精确匹配。多账号用户则要在
+          // 每张卡片上各点一次「连接控制台」，这正是本次要的「按账号分离」。
+          const orphans = getMimoSessions().filter((s) => s.keySuffixes.length === 0)
+          if (orphans.length === 1) sess = orphans[0]
+        }
+        if (!sess) {
+          // 这把 key 还没连过控制台（或会话已失效被清掉）：清空余额，卡片挂「连接控制台」。
           this.applyBalance(statusKey, null)
           return
         }
-        const info = await fetchMimoBalance(cookie)
-        // null after 401 means the cookie just got cleared — drop the balance;
-        // null on transient network error keeps the previous value.
-        // 归属过滤：key 列表（约 5 分钟缓存）拿得到时，只有 cookie 账号名下
-        // 的 key 才显示账号余额；别家账号的 key 直接清掉余额，避免被误标
-        // 「同账号」（用户可能有多把 key 分属不同账号）。
-        if (info?.accountScope) {
-          const suffixes = await this.getMimoKeySuffixes(cookie)
-          if (suffixes && !suffixes.includes(key.slice(-6))) {
+
+        const cached = this.mimoAccountCache.get(sess.accountId)
+        let info: BalanceInfo | null
+        if (cached && Date.now() - cached.at < 60_000) {
+          info = cached.info
+        } else {
+          const res = await fetchMimoBalance(sess.cookie)
+          if (res.status === 401 || res.status === 403) {
+            // 会话过期：删掉这个账号，卡片回到「连接控制台」，别拿旧余额骗人。
+            removeMimoSession(sess.accountId)
+            this.mimoAccountCache.delete(sess.accountId)
             this.applyBalance(statusKey, null)
             return
           }
+          if (res.status !== 200) {
+            // 网络抖动 / 接口异常：保留上一次读数，不要把余额擦掉。
+            this.applyBalance(statusKey, undefined)
+            return
+          }
+          info = res.info
+          this.mimoAccountCache.set(sess.accountId, { at: Date.now(), info })
+          // 老版本迁移过来的会话还不知道名下有哪些 key，补拉一次尾号列表。
+          if (info && sess.keySuffixes.length === 0) {
+            const list = await fetchMimoKeyList(sess.cookie)
+            if (list && list.length > 0) {
+              saveMimoSession({ ...sess, keySuffixes: list, updatedAt: Date.now() })
+            }
+          }
         }
-        this.applyBalance(statusKey, info ?? (getMimoCookie() ? undefined : null))
+
+        this.applyBalance(statusKey, info)
         // 用量（token）是另一个接口，同一个 cookie 再拉一次；有余额才拉。
-        if (info) void this.sampleMimoUsage(cookie)
+        if (info) void this.sampleMimoUsage(sess.cookie)
         return
       }
 
@@ -1164,51 +1181,9 @@ export class MonitorEngine {
     ) {
       return
     }
-    // Account-scoped wallets (MiMo console cookie) are shared by every key
-    // under the same login. Paint the number on the lowest keyIndex only so
-    // two boxes don't both claim "their" balance (and so refresh doesn't
-    // flip the badge between boxes). Others get a 同账号 marker.
-    if (info.accountScope && info.available != null && info.available > 0) {
-      const prefix = status.providerId + '#'
-      const holders = [...this.statuses.entries()].filter(
-        ([k, s]) =>
-          k.startsWith(prefix) &&
-          s.balanceInfo?.accountScope &&
-          (s.balanceInfo.available ?? 0) > 0 &&
-          s.errorCode !== '余额不足，无法调用'
-      )
-      const holderIndex = holders.reduce(
-        (min, [, s]) => Math.min(min, s.keyIndex),
-        Number.MAX_SAFE_INTEGER
-      )
-      const isHolder = status.keyIndex <= holderIndex
-      if (!isHolder) {
-        if (status.errorCode !== '余额不足，无法调用') {
-          status.balanceInfo = {
-            currency: info.currency,
-            accountScope: true,
-            accountId: info.accountId,
-            available: undefined,
-            raw: info.raw,
-          }
-          this.onStatusChange?.(this.statuses)
-        }
-        return
-      }
-      // This box is (or becomes) the holder — clear 同账号 markers on siblings.
-      for (const [k, s] of this.statuses) {
-        if (k === statusKey || !k.startsWith(prefix)) continue
-        if (s.balanceInfo?.accountScope && s.balanceInfo.available == null && s.errorCode !== '余额不足，无法调用') {
-          s.balanceInfo = {
-            currency: info.currency,
-            accountScope: true,
-            accountId: info.accountId,
-            available: undefined,
-            raw: info.raw,
-          }
-        }
-      }
-    }
+    // 账号级钱包（MiMo 控制台）现在按账号归属：每把 key 显示的是「它自己所属
+    // 账号」的钱包，所以同账号的多把 key 显示同一个数字是正常的 —— 不能再像以前
+    // 那样只画在 keyIndex 最小的那个框上（那会把不同账号的钱混在一起显示）。
     status.balanceInfo = info
     this.recordBalanceSample(status, info)
     this.onStatusChange?.(this.statuses)
@@ -1232,6 +1207,41 @@ export class MonitorEngine {
       if (k.startsWith(providerId + '#')) this.lastBalanceAt.delete(k)
     }
     await this.checkProvider(providerId)
+  }
+
+  /**
+   * 只刷余额、不做延迟探测 —— 连完控制台之后调用。
+   * 探测要真的打一次 chat 接口（花 token），余额接口免费，所以这里只查余额。
+   */
+  async refreshBalances(providerId: string): Promise<void> {
+    const provider = this.resolve(providerId)
+    const keys = this.keys.get(providerId) ?? []
+    if (!provider?.balanceUrl || keys.length === 0) return
+    this.mimoAccountCache.clear()
+    await Promise.all(
+      keys.map(async (key, i) => {
+        const sk = this.statusKey(providerId, i)
+        // 还没探测过的 key 先补一条「等待」状态，否则余额没有卡片可以挂。
+        if (!this.statuses.has(sk)) {
+          this.updateStatus(sk, {
+            providerId,
+            keyIndex: i,
+            keyMask: MonitorEngine.maskKey(key),
+            status: 'idle',
+            latency: null,
+            lastChecked: 0,
+            authStatus: 'unknown',
+            balanceInfo: null,
+          })
+        }
+        this.lastBalanceAt.delete(sk)
+        try {
+          await this.checkBalance(provider, key, providerId, sk)
+        } catch {
+          // 余额刷新失败不影响监测
+        }
+      })
+    )
   }
 
   async detectKey(key: string): Promise<string | null> {

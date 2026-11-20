@@ -32,8 +32,11 @@ export interface ElectronAPI {
   checkNow: (providerId: string, keyIndex?: number) => Promise<boolean>
   importCustom: (entries: Array<{ baseUrl: string; key: string }>) => Promise<Array<{ baseUrl: string; key: string; providerId: string }>>
   detectKey: (key: string) => Promise<string | null>
-  /** Open the MiMo console login window; resolves true when cookie saved. */
-  mimoConnect: () => Promise<boolean>
+  /**
+   * 登录某把密钥所属的小米账号控制台（一个账号一条会话，互不串号）。
+   * keySuffix = 那把密钥的尾 6 位；不传则只要求登录一个账号。
+   */
+  mimoConnect: (keySuffix?: string) => Promise<MimoConnectResult>
   /** Send custom text+model to one provider and measure latency.
    *  Omitted fields fall back to the saved 测延迟 settings. */
   latencyTest: (opts: {
@@ -147,6 +150,18 @@ export interface BalanceInfo {
   /** Console userId when known — helps spot a wrong-account cookie. */
   accountId?: string
   raw?: unknown
+}
+
+/** 连接 MiMo 控制台的结果（按账号登录：一个小米账号一条会话，互不串号）。 */
+export interface MimoConnectResult {
+  ok: boolean
+  /** 登录成功后拿到的控制台账号 id（cookie 里的 userId）。 */
+  accountId?: string
+  /** 该账号名下的密钥尾 6 位列表；接口失败时为 null。 */
+  keySuffixes?: string[] | null
+  /** 点「连接控制台」的那把 key 是否属于这个账号；false = 登错号了。 */
+  keyFound?: boolean
+  error?: string
 }
 
 /** 账单：每天每个厂商的消费金额。 */

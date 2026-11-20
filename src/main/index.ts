@@ -34,6 +34,7 @@ import {
   appendProbeUsage,
   getProbeUsage,
   clearBrokeAlerted,
+  migrateMimoSessions,
 } from './store'
 import { buildDailyReport, buildUsageReport, buildReportCsv, buildTokenReport } from './report'
 
@@ -549,13 +550,15 @@ ipcMain.handle('monitor:detectKey', async (_event, key: string) => {
   return monitorEngine.detectKey(key)
 })
 
-ipcMain.handle('monitor:mimoConnect', async () => {
-  const ok = await openMimoLoginWindow(mainWindow)
-  if (ok) {
-    // Cookie just saved — refresh mimo balances immediately
-    await monitorEngine.forceBalanceRefresh('mimo')
+ipcMain.handle('monitor:mimoConnect', async (_event, keySuffix?: string) => {
+  // 按卡片传进来的密钥尾号（后 6 位）登录它所属的小米账号：一个账号一条会话，
+  // 想连 7001 的账号就点 7001 的按钮，不会再被自动登回上一个账号。
+  const result = await openMimoLoginWindow(mainWindow, { keySuffix })
+  if (result.ok) {
+    // 只刷余额，不做探测 —— 探测要花 token，余额接口免费。
+    await monitorEngine.refreshBalances('mimo')
   }
-  return ok
+  return result
 })
 
 ipcMain.handle(
@@ -906,6 +909,8 @@ ipcMain.handle(
 app.whenReady().then(() => {
   // 已经有一个实例在跑：本进程直接退出，不建窗口/托盘/监测
   if (!isPrimaryInstance) return
+  // 老版本只有一条全局 MiMo cookie：升级后迁成「按账号」的会话，别让用户重登。
+  migrateMimoSessions()
   // Custom providers + persisted keys must be visible to the monitor engine
   monitorEngine.registerProviders(getCustomProviders())
   monitorEngine.seedKeys(getApiKeys())
