@@ -1063,6 +1063,9 @@ app.whenReady().then(() => {
   if (!isPrimaryInstance) return
   // 老版本只有一条全局 MiMo cookie：升级后迁成「按账号」的会话，别让用户重登。
   migrateMimoSessions()
+  // 账本立刻迁到独立的 gzip 文件：老配置里那三坨大数组（余额/用量/探测流水）
+  // 会被一次性搬走，主配置从几百 KB 回到几 KB，用户下次看配置也不会被流水刷屏。
+  syncFlushSamples()
   // Custom providers + persisted keys must be visible to the monitor engine
   monitorEngine.registerProviders(getCustomProviders())
   monitorEngine.seedKeys(getApiKeys())

@@ -1,4 +1,6 @@
 import Store from 'electron-store'
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { gunzipSync, gzipSync } from 'zlib'
 
 /**
  * MiMo 控制台会话：一个小米账号一条。
@@ -133,17 +135,196 @@ export interface ProbeUsageDay {
   total: number
 }
 
-/** 本地账本保留天数。再久的日常明细意义不大，还会让配置文件越来越大。 */
+/** 本地账本保留天数：更早的明细不用看了。 */
 const HISTORY_DAYS = 200
-/** 硬上限，防止长时间运行把配置文件撑爆。 */
+/** 这段时间内保留每一次读数；更早的每天每个钱包只留最后一条（账单只需要收尾值）。 */
+const RAW_DAYS = 14
+/** 硬上限，防止极端情况把账本撑爆。 */
 const MAX_SAMPLES = 20000
 /** 同一个钱包、金额没变的读数在这个窗口内只记一条（去重轮询噪声）。 */
 const SAMPLE_DEDUPE_MS = 10 * 60 * 1000
+/** 账本文件格式版本；不认识的版本直接重建（这是本机流水，不是权威数据）。 */
+const HISTORY_FORMAT = 1
 
-function pruneSamples<T extends { t: number }>(rows: T[]): T[] {
-  const cutoff = Date.now() - HISTORY_DAYS * 24 * 60 * 60 * 1000
-  const kept = rows.filter((row) => row.t >= cutoff)
+/**
+ * 账本单独存一个 gzip 文件，不再塞进 electron-store 的主配置。
+ *
+ * 原来三份流水全在主配置 JSON 里：用户用两天就 160 KB（余额样本 89 KB / 用量样本
+ * 29 KB），每次探测都触发整文件重写；而数据重复度极高（providerId、currency 反复
+ * 出现），gzip 能压掉 90% 以上。现在：
+ *   · 明细搬进 `llm-monitor-config.history.json.gz`（gzip 后一般十几 KB）；
+ *   · 主配置只剩密钥 / 会话 / 设置，回到几 KB，坏了人工也能看能改；
+ *   · 落盘用「写临时文件 + rename」，不会留下写一半的坏 JSON；
+ *   · 老版本留在主配置里的三份流水第一次落盘后自动删掉（迁移不丢数据）。
+ */
+interface HistoryFile {
+  v: number
+  balance: BalanceSample[]
+  usage: UsageSample[]
+  probeUsage: Record<string, Record<string, ProbeUsageDay>>
+}
+
+function historyPath(): string {
+  return store.path.replace(/\.json$/i, '') + '.history.json.gz'
+}
+
+/** 钱包标识（与 report.ts 的口径一致：账号级钱包按 accountId 分开）。 */
+function walletOf(row: BalanceSample): string {
+  if (row.accountScope || row.keyIndex === -1) {
+    return `${row.providerId}#account:${row.accountId ?? 'unknown'}`
+  }
+  return `${row.providerId}#${row.keyIndex}`
+}
+
+/**
+ * 分两级裁剪余额样本：最近 RAW_DAYS 天原样保留；更早的每天每个钱包只留最后一条
+ * —— 账单是「前一天收尾余额 − 今天收尾余额」，中间的读数对结果没有贡献。
+ */
+function pruneBalance(rows: BalanceSample[]): BalanceSample[] {
+  const now = Date.now()
+  const rawCutoff = now - RAW_DAYS * 86_400_000
+  const hardCutoff = now - HISTORY_DAYS * 86_400_000
+  const recent: BalanceSample[] = []
+  const dailyLast = new Map<string, BalanceSample>()
+  for (const row of rows) {
+    if (row.t < hardCutoff) continue
+    if (row.t >= rawCutoff) {
+      recent.push(row)
+      continue
+    }
+    // rows 按时间追加，同一 key 后写覆盖先写 = 「当天最后一条」。
+    dailyLast.set(`${walletOf(row)}|${dateKey(row.t)}`, row)
+  }
+  const kept = [...recent, ...dailyLast.values()].sort((a, b) => a.t - b.t)
   return kept.length > MAX_SAMPLES ? kept.slice(kept.length - MAX_SAMPLES) : kept
+}
+
+/** 用量样本同理：最近 RAW_DAYS 天留全量，更早的每天只留收尾值（累计值做差即可）。 */
+function pruneUsage(rows: UsageSample[]): UsageSample[] {
+  const now = Date.now()
+  const rawCutoff = now - RAW_DAYS * 86_400_000
+  const hardCutoff = now - HISTORY_DAYS * 86_400_000
+  const recent: UsageSample[] = []
+  const dailyLast = new Map<string, UsageSample>()
+  for (const row of rows) {
+    if (row.t < hardCutoff) continue
+    if (row.t >= rawCutoff) {
+      recent.push(row)
+      continue
+    }
+    dailyLast.set(`${row.providerId}|${dateKey(row.t)}`, row)
+  }
+  return [...recent, ...dailyLast.values()].sort((a, b) => a.t - b.t)
+}
+
+/**
+ * 落盘前的紧凑化：时间戳存「秒」（13 位 → 10 位），金额只留到分。
+ * 余额本来就只有两位小数，之前直接存浮点结果，会带出 0.9299999999999999 这种尾巴。
+ */
+function encodeBalance(rows: BalanceSample[]): BalanceSample[] {
+  return rows.map((row) => ({
+    ...row,
+    t: Math.floor(row.t / 1000),
+    available: Math.round(row.available * 100) / 100,
+  }))
+}
+
+function decodeBalance(rows: BalanceSample[]): BalanceSample[] {
+  return rows.map((row) => ({
+    ...row,
+    // 兼容老格式：1e12 以下视为「秒」（现在约 1.8e9），否则就是毫秒。
+    t: row.t < 1e12 ? row.t * 1000 : row.t,
+  }))
+}
+
+function encodeUsage(rows: UsageSample[]): UsageSample[] {
+  return rows.map((row) => ({
+    ...row,
+    t: Math.floor(row.t / 1000),
+    totalCost: Math.round(row.totalCost * 100) / 100,
+    monthCost: Math.round(row.monthCost * 100) / 100,
+  }))
+}
+
+function decodeUsage(rows: UsageSample[]): UsageSample[] {
+  return rows.map((row) => ({ ...row, t: row.t < 1e12 ? row.t * 1000 : row.t }))
+}
+
+/*
+ * 采样数据的内存副本 + 合批落盘（500ms 合并一次 gzip 写盘）。
+ */
+let balanceCache: BalanceSample[] | null = null
+let usageCache: UsageSample[] | null = null
+let probeUsageCache: Record<string, Record<string, ProbeUsageDay>> | null = null
+let sampleFlushTimer: ReturnType<typeof setTimeout> | null = null
+let historyLoaded = false
+/** 本次进程是否从主配置里接管了老流水（迁移完要把配置里那三坨大数组删掉）。 */
+let legacyHistoryPending = false
+
+function ensureHistoryLoaded(): void {
+  if (historyLoaded) return
+  historyLoaded = true
+  try {
+    const file = historyPath()
+    if (existsSync(file)) {
+      const parsed = JSON.parse(gunzipSync(readFileSync(file)).toString('utf8')) as HistoryFile
+      if (parsed.v === HISTORY_FORMAT) {
+        balanceCache = decodeBalance(parsed.balance ?? [])
+        usageCache = decodeUsage(parsed.usage ?? [])
+        probeUsageCache = parsed.probeUsage ?? {}
+        return
+      }
+      console.warn('[history] unknown format, rebuilding:', parsed.v)
+    }
+  } catch (err) {
+    console.error('[history] load failed, starting empty:', err)
+  }
+  // 没有独立账本文件（或格式不认识）：从主配置里接管老数据。
+  balanceCache = store.get('balanceHistory', [])
+  usageCache = store.get('usageHistory', [])
+  probeUsageCache = store.get('probeUsage', {})
+  legacyHistoryPending =
+    (balanceCache?.length ?? 0) > 0 ||
+    (usageCache?.length ?? 0) > 0 ||
+    Object.keys(probeUsageCache ?? {}).length > 0
+}
+
+function scheduleSampleFlush(): void {
+  if (sampleFlushTimer) return
+  sampleFlushTimer = setTimeout(syncFlushSamples, 500)
+  // 不让这个定时器拖住进程退出；退出前 before-quit 会显式 flush 一次。
+  sampleFlushTimer.unref?.()
+}
+
+/** 把攒着的采样一次性写盘（gzip + 原子替换）。退出前调用，别丢最后几秒的账。 */
+export function syncFlushSamples(): void {
+  if (sampleFlushTimer) {
+    clearTimeout(sampleFlushTimer)
+    sampleFlushTimer = null
+  }
+  ensureHistoryLoaded()
+  const payload: HistoryFile = {
+    v: HISTORY_FORMAT,
+    balance: encodeBalance(pruneBalance(balanceCache ?? [])),
+    usage: encodeUsage(pruneUsage(usageCache ?? [])),
+    probeUsage: probeUsageCache ?? {},
+  }
+  try {
+    const file = historyPath()
+    const tmp = `${file}.tmp`
+    // level 9：账本最多一两百 KB，而且几秒才写一次，多花几毫秒换更小体积很值。
+    writeFileSync(tmp, gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'), { level: 9 }))
+    renameSync(tmp, file)
+    if (legacyHistoryPending) {
+      // 迁移完成：把主配置里的三坨大数组删掉，配置文件立刻从几百 KB 回到几 KB。
+      store.delete('balanceHistory')
+      store.delete('usageHistory')
+      store.delete('probeUsage')
+      legacyHistoryPending = false
+    }
+  } catch (err) {
+    console.error('[history] flush failed:', err)
+  }
 }
 
 /** 从后往前找最后一条匹配样本（比 reverse() 省一次数组复制）。 */
@@ -154,47 +335,9 @@ function findLast<T>(rows: T[], match: (row: T) => boolean): T | undefined {
   return undefined
 }
 
-/*
- * 采样数据的内存副本 + 合批落盘。
- *
- * electron-store 的 set 是「整个配置文件重写」：十几把密钥每 10 秒一轮探测，每把都会
- * 触发一次 40KB+ 的 JSON 落盘（历史保留 200 天，只会越来越大），磁盘和 CPU 都是白烧。
- * 现在采样先攒在内存里、最多 500ms 合并写一次；退出前 syncFlushSamples() 兜底。
- */
-let balanceCache: BalanceSample[] | null = null
-let usageCache: UsageSample[] | null = null
-let probeUsageCache: Record<string, Record<string, ProbeUsageDay>> | null = null
-let sampleFlushTimer: ReturnType<typeof setTimeout> | null = null
-
-function scheduleSampleFlush(): void {
-  if (sampleFlushTimer) return
-  sampleFlushTimer = setTimeout(syncFlushSamples, 500)
-  // 不让这个定时器拖住进程退出；退出前 before-quit 会显式 flush 一次。
-  sampleFlushTimer.unref?.()
-}
-
-/** 把攒着的采样一次性写盘（退出前调用，丢掉最后 500ms 以内的数据太可惜）。 */
-export function syncFlushSamples(): void {
-  if (sampleFlushTimer) {
-    clearTimeout(sampleFlushTimer)
-    sampleFlushTimer = null
-  }
-  if (balanceCache) {
-    store.set('balanceHistory', pruneSamples(balanceCache))
-    balanceCache = null
-  }
-  if (usageCache) {
-    store.set('usageHistory', pruneSamples(usageCache))
-    usageCache = null
-  }
-  if (probeUsageCache) {
-    store.set('probeUsage', probeUsageCache)
-    probeUsageCache = null
-  }
-}
-
 export function getBalanceHistory(): BalanceSample[] {
-  if (!balanceCache) balanceCache = store.get('balanceHistory', [])
+  ensureHistoryLoaded()
+  if (!balanceCache) balanceCache = []
   return balanceCache
 }
 
@@ -218,13 +361,14 @@ export function appendBalanceSample(sample: BalanceSample): void {
     return
   }
   rows.push(sample)
-  // 裁剪留到落盘时做（pruneSamples），这里只防止内存无限增长。
+  // 裁剪留到落盘时做（pruneBalance），这里只防止内存无限增长。
   if (rows.length > MAX_SAMPLES * 2) rows.splice(0, rows.length - MAX_SAMPLES)
   scheduleSampleFlush()
 }
 
 export function getUsageHistory(): UsageSample[] {
-  if (!usageCache) usageCache = store.get('usageHistory', [])
+  ensureHistoryLoaded()
+  if (!usageCache) usageCache = []
   return usageCache
 }
 
@@ -254,7 +398,8 @@ function dateKey(t: number): string {
 }
 
 export function getProbeUsage(): Record<string, Record<string, ProbeUsageDay>> {
-  if (!probeUsageCache) probeUsageCache = store.get('probeUsage', {})
+  ensureHistoryLoaded()
+  if (!probeUsageCache) probeUsageCache = {}
   return probeUsageCache
 }
 
