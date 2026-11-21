@@ -1,6 +1,6 @@
 {
   "name": "llm-api-monitor",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "LLM API Real-time Monitor",
   "author": "yzx00123",
   "main": "./out/main/index.js",
@@ -15,7 +15,8 @@
     "ship": "npm run build && npm run dist && npm run release"
   },
   "dependencies": {
-    "electron-store": "^8.2.0"
+    "electron-store": "^8.2.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",

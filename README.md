@@ -19,6 +19,7 @@
 - **系统托盘 + 后台驻留**：关窗不退出，监测继续，托盘一键唤出（可关）
 - **状态快照导出**：一键导出所有密钥状态为 CSV（带 BOM，Excel 直接打开不乱码）
 - **消费账单**：按天统计每家厂商花了多少钱，折线图 / 柱状图 / 树状图切换，可导出 CSV；token 用量全厂商通用（统计本软件探测自身消耗）
+- **导出到 Agent**：一键把密钥写进 19 个 AI 编码 Agent 的配置（Claude Code / Codex / Gemini CLI / Cursor / OpenClaw / DeepSeek Harness …）；写入前显示将要写入的完整文件内容，写入后回读校验，只改自己那一条、保留别人的配置与注释
 - **应用内使用说明**：设置 → 使用说明，含快速上手三步、界面说明与常见问题
 - **低资源占用**：禁用 GPU 加速 + V8 堆上限 + 隐藏时主动 GC，前台 ~156 MB / 后台 ~148 MB
 
@@ -75,8 +76,10 @@ src/
 ├── main/            # Electron 主进程
 │   ├── index.ts     # 入口 + IPC 路由
 │   ├── monitor.ts   # 监测引擎（限并发、防重入、余额查询）
+│   ├── mimo.ts      # 小米 MiMo 控制台会话（按账号隔离）
+│   ├── agentExport.ts # 导出到 Agent：安装检测 / 预演 / 写入 / 回读校验
 │   ├── providers.ts # 内置厂商注册表
-│   └── store.ts     # electron-store 持久化
+│   └── store.ts     # electron-store 持久化（账本走 gzip）
 ├── preload/         # contextBridge 安全桥接
 └── renderer/        # React 仪表盘
     └── src/components/
@@ -99,6 +102,17 @@ src/
 - Azure OpenAI / AWS Bedrock 的签名认证暂未支持
 
 ## 更新日志
+
+### v1.4.4
+
+这一版重做了「导出到 Agent」：检测不再瞎猜、写入不再破坏别人的配置，顺带修掉弹窗卡顿。
+
+- 重做：**安装检测只看真实证据**。旧版把「配置文件存在」当成已安装，于是自己之前导出过的 `~/.claude/settings.json` 让 Claude Code 永远显示「已安装」，实际没装的 OpenClaw 也被报成已装；现在只认命令行可执行文件与安装目录，并把证据路径直接写在卡片上。
+- 新增：**DeepSeek Harness 支持**。它的配置不在 `~/.deepseek-harness`，而是 `~/.dsh/profiles/desktop/cordis.patch.yml`（provider）+ `~/.dsh/.credentials.yaml`（密钥 refs），现在两处一起写，原有 YAML 注释、别的 provider 全部保留。
+- 新增：**写入前预演 + 写入后回读校验**。选好目标就能看到将要写入的完整文件内容，点写入后立刻回读解析，确认「自己那一条在、别人的还在」，结果直接显示在按钮上方。
+- 修复：**不再破坏用户的配置文件**。JSONC（MiMo Desktop）改成原地文本插入以保住注释；Codex 的 TOML 只替换自己那一段，后面的 `[profiles.x]` / `[mcp_servers.*]` 原样留下；OpenClaw / OpenCode / Gemini / Kimi 等只在对应容器里加 `llm-monitor` 一个条；第一次改写某个文件前自动生成 `*.llm-monitor.bak` 备份。
+- 修复：**弹窗卡顿**。旧版每次渲染都同步重新检测 22 个目标，且遮罩带全窗 `backdrop-filter` 模糊（每帧重新采样，帧率直掉）；现在检测只在打开时跑一次，遮罩改成纯半透明，预演输入加防抖。
+- 修复：安装证据路径里的 `AppData/Roaming/...` 之前按进程工作目录解析（等于随机），现在统一按用户主目录展开；Cursor 这类没有可安全改写的配置文件的目标，改为只提供「复制配置」。
 
 ### v1.4.3
 

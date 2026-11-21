@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { AgentExportOptions } from '../main/agentExport'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   getProviders: () => ipcRenderer.invoke('monitor:getProviders'),
@@ -48,33 +49,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exportReportCsv: (days?: number, currency?: string) =>
     ipcRenderer.invoke('report:exportCsv', days, currency),
   detectAgentConfigs: () => ipcRenderer.invoke('app:detectAgentConfigs'),
-  writeAgentConfig: (opts: {
-    target:
-      | 'claudeCode'
-      | 'cursorUser'
-      | 'codex'
-      | 'gemini'
-      | 'openCode'
-      | 'mimoDesktop'
-      | 'openclaw'
-      | 'deepseekHarness'
-      | 'kimiCode'
-      | 'minimaxCode'
-      | 'codebuddy'
-      | 'workbuddy'
-      | 'baiduComate'
-      | 'byteTrae'
-      | 'aliQoder'
-      | 'aliLingma'
-      | 'doubao'
-      | 'marscode'
-      | 'coze'
-      | 'custom'
-    path?: string
-    baseUrl: string
-    apiKey: string
-    model?: string
-  }) => ipcRenderer.invoke('app:writeAgentConfig', opts),
+  previewAgentConfig: (opts: AgentExportOptions) =>
+    ipcRenderer.invoke('app:previewAgentConfig', opts),
+  writeAgentConfig: (opts: AgentExportOptions) => ipcRenderer.invoke('app:writeAgentConfig', opts),
   onStatusUpdate: (callback: (statuses: Record<string, unknown>) => void) => {
     ipcRenderer.on('monitor:statusUpdate', (_event, statuses) => callback(statuses))
     return () => {

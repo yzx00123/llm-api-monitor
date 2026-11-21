@@ -65,34 +65,11 @@ export interface ElectronAPI {
   getTokenReport: (days?: number) => Promise<TokenReport>
   /** 导出账单 CSV（带 BOM）。 */
   exportReportCsv: (days?: number, currency?: string) => Promise<{ ok: boolean; path?: string }>
-  detectAgentConfigs: () => Promise<Record<string, { path: string; exists: boolean }>>
-  writeAgentConfig: (opts: {
-    target:
-      | 'claudeCode'
-      | 'cursorUser'
-      | 'codex'
-      | 'gemini'
-      | 'openCode'
-      | 'mimoDesktop'
-      | 'openclaw'
-      | 'deepseekHarness'
-      | 'kimiCode'
-      | 'minimaxCode'
-      | 'codebuddy'
-      | 'workbuddy'
-      | 'baiduComate'
-      | 'byteTrae'
-      | 'aliQoder'
-      | 'aliLingma'
-      | 'doubao'
-      | 'marscode'
-      | 'coze'
-      | 'custom'
-    path?: string
-    baseUrl: string
-    apiKey: string
-    model?: string
-  }) => Promise<{ ok: boolean; path?: string; error?: string }>
+  detectAgentConfigs: () => Promise<AgentTargetInfo[]>
+  /** 预演写入：返回「如果现在写入，这些文件会变成什么样」。 */
+  previewAgentConfig: (opts: AgentExportOptions) => Promise<AgentPlan>
+  /** 真正写入：先备份、再写、最后回读校验。 */
+  writeAgentConfig: (opts: AgentExportOptions) => Promise<AgentWriteResult>
   onStatusUpdate: (callback: (statuses: Record<string, ProviderStatus>) => void) => () => void
   /** 监测开关的真实状态（托盘里点开始/停止、主进程自动恢复轮询都会推送） */
   onMonitoringState: (callback: (state: { monitoring: boolean }) => void) => () => void
@@ -233,6 +210,80 @@ export interface TokenReport {
   sampleCount: number
   firstDay: string | null
   lastDay: string | null
+}
+
+// ── 导出到 Agent ──────────────────────────────────────────────────
+export type AgentTargetId =
+  | 'claudeCode'
+  | 'cursorUser'
+  | 'codex'
+  | 'gemini'
+  | 'openCode'
+  | 'mimoDesktop'
+  | 'openclaw'
+  | 'deepseekHarness'
+  | 'kimiCode'
+  | 'minimaxCode'
+  | 'codebuddy'
+  | 'workbuddy'
+  | 'baiduComate'
+  | 'byteTrae'
+  | 'aliQoder'
+  | 'aliLingma'
+  | 'doubao'
+  | 'marscode'
+  | 'coze'
+  | 'custom'
+
+export interface AgentTargetInfo {
+  id: AgentTargetId
+  label: string
+  group: '国际' | '国内'
+  format: 'json' | 'jsonc' | 'toml' | 'yaml' | 'env' | 'manual'
+  /** 配置文件绝对路径 */
+  path: string
+  /** 配置文件是否已存在 */
+  exists: boolean
+  /** 是否找到真实安装证据（命令行 / 安装目录） */
+  installed: boolean
+  /** 证据说明，如「安装目录 C:\\Users\\…\\AppData\\Roaming\\Xiaomi MiMo」 */
+  evidence: string | null
+  /** 写进文件里哪一块 */
+  writes: string
+  note?: string
+}
+
+export interface AgentExportOptions {
+  target: AgentTargetId
+  path?: string
+  baseUrl: string
+  apiKey: string
+  model?: string
+  providerName?: string
+}
+
+export interface AgentFilePlan {
+  path: string
+  content: string
+  language: 'json' | 'jsonc' | 'toml' | 'yaml' | 'env' | 'text'
+}
+
+export interface AgentPlan {
+  ok: boolean
+  target: string
+  path: string
+  files: AgentFilePlan[]
+  /** 只能复制、不能直接写文件（例如 Cursor） */
+  manual: boolean
+  note?: string
+  error?: string
+}
+
+export interface AgentWriteResult {
+  ok: boolean
+  path: string
+  files: string[]
+  error?: string
 }
 
 export interface Window {
