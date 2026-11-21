@@ -81,4 +81,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeAllListeners('monitor:statusUpdate')
     }
   },
+  // 监测开关的真实状态（托盘里点开始/停止、主进程自动恢复都会推过来）
+  onMonitoringState: (callback: (state: { monitoring: boolean }) => void) => {
+    ipcRenderer.on('monitor:state', (_event, state) => callback(state))
+    return () => {
+      ipcRenderer.removeAllListeners('monitor:state')
+    }
+  },
 })

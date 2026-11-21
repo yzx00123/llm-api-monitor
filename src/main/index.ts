@@ -11,7 +11,7 @@ import {
   nativeImage,
 } from 'electron'
 import { join } from 'path'
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs'
+import { writeFileSync, readFileSync, existsSync, mkdirSync, copyFileSync } from 'fs'
 import { homedir } from 'os'
 import { PROVIDERS, detectProvider } from './providers'
 import { monitorEngine, MonitorEngine, ProviderStatus, StatusAlert } from './monitor'
@@ -35,6 +35,7 @@ import {
   getProbeUsage,
   clearBrokeAlerted,
   migrateMimoSessions,
+  syncFlushSamples,
 } from './store'
 import { buildDailyReport, buildUsageReport, buildReportCsv, buildTokenReport } from './report'
 
@@ -133,6 +134,26 @@ const ALERT_COOLDOWN_MS = 60_000
 const appStartedAt = Date.now()
 /** 本次会话里真正播报过「掉线」的 key —— 播报过「恢复」才有效（配对）。 */
 const announcedDown: Set<string> = new Set<string>()
+/** 启动宽限期内被压下的掉线播报：宽限期结束后仍未恢复就补报（见 handleAlert）。 */
+const pendingDownAlerts: Map<string, StatusAlert> = new Map()
+
+/**
+ * 宽限期结束后补报一次被压下的掉线。
+ *
+ * 不这样做的话：打开软件头几分钟内网络未就绪导致的掉线会被宽限期「吞掉」——
+ * monitor 只在状态由好变坏的那一刻发一次 down，之后不会再发；而「已恢复」的播报
+ * 又要求 announcedDown 里有记录。结果是整个故障期既不报掉线也不报恢复。
+ */
+function replayPendingDown(statusKey: string, alert: StatusAlert, delayMs: number): void {
+  setTimeout(() => {
+    if (!pendingDownAlerts.has(statusKey)) return
+    pendingDownAlerts.delete(statusKey)
+    const st = monitorEngine.getStatuses().get(statusKey)
+    // 宽限期结束时已经恢复（或还在检测中）就别补报了，避免真正的噪音。
+    if (!st || st.status === 'online' || st.status === 'checking' || st.status === 'idle') return
+    handleAlert(alert)
+  }, Math.max(0, delayMs))
+}
 
 function providerDisplayName(providerId: string): string {
   return (
@@ -166,7 +187,13 @@ function handleAlert(alert: StatusAlert): void {
   // 宽限期 = 3 个探测周期（掉线判定所需的连续失败窗口）+ 1 分钟，上限 30 分钟。
   if (alert.kind === 'down') {
     const graceMs = Math.min(3 * settings.intervalMs + 60_000, 30 * 60_000)
-    if (Date.now() - appStartedAt < graceMs) return
+    const elapsed = Date.now() - appStartedAt
+    if (elapsed < graceMs) {
+      // 压住（不是丢弃）：宽限期结束若仍然掉线，由 replayPendingDown 补报一次。
+      pendingDownAlerts.set(statusKey, alert)
+      replayPendingDown(statusKey, alert, graceMs - elapsed + 500)
+      return
+    }
   }
   // 配对：本次会话没播报过「掉线」就不播报「已恢复」——
   // 打开软件首轮探测失败、下一轮成功产生的"假恢复"由此被挡掉。
@@ -202,6 +229,34 @@ function handleAlert(alert: StatusAlert): void {
 
 // ===== 系统托盘 + 后台驻留 =====
 
+/**
+ * 把「是否在轮询」推给界面。
+ *
+ * 以前只有界面自己的按钮会改这个状态：从托盘点「开始/停止」时，窗口里的按钮还停在
+ * 旧状态（显示「▶ 开始」但其实已经在跑），停止也不落盘 —— 重启后又自己跑起来。
+ */
+function pushMonitoringState(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('monitor:state', { monitoring: monitorEngine.isEnabled() })
+  }
+}
+
+/** 开始监测（界面按钮与托盘共用）：启动轮询 + 落盘 + 同步界面状态。 */
+function startMonitoring(intervalMs?: number): void {
+  monitorEngine.setConfig(intervalMs ? { enabled: true, intervalMs } : { enabled: true })
+  updateSettings(intervalMs ? { enabled: true, intervalMs } : { enabled: true })
+  bindStatusPush()
+  pushMonitoringState()
+}
+
+/** 停止监测（界面按钮与托盘共用）：停轮询 + 落盘 + 同步界面状态。 */
+function stopMonitoring(): void {
+  monitorEngine.stopAll()
+  monitorEngine.setConfig({ enabled: false })
+  updateSettings({ enabled: false })
+  pushMonitoringState()
+}
+
 function showMainWindow(): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show()
@@ -218,7 +273,17 @@ function createTray(): void {
   tray = new Tray(icon)
   tray.setToolTip('LLM API Monitor')
 
-  const menu = Menu.buildFromTemplate([
+  // 左键唤出主界面，右键弹菜单（Windows 上 setContextMenu 会把左键也变成菜单）
+  tray.on('click', () => showMainWindow())
+  // 菜单每次弹出时重建：开始/停止的可用状态要跟 monitorEngine 的实际状态一致，
+  // 静态菜单在托盘点完开始后还显示「开始监测」可点，与实际相反。
+  tray.on('right-click', () => tray?.popUpContextMenu(buildTrayMenu()))
+  tray.on('double-click', () => showMainWindow())
+}
+
+function buildTrayMenu(): Menu {
+  const running = monitorEngine.isEnabled()
+  return Menu.buildFromTemplate([
     {
       label: '打开主界面',
       click: () => showMainWindow(),
@@ -226,17 +291,13 @@ function createTray(): void {
     { type: 'separator' },
     {
       label: '开始监测',
-      click: () => {
-        monitorEngine.setConfig({ enabled: true })
-        monitorEngine.startAll()
-      },
+      enabled: !running,
+      click: () => startMonitoring(getSettings().intervalMs),
     },
     {
       label: '停止监测',
-      click: () => {
-        monitorEngine.stopAll()
-        monitorEngine.setConfig({ enabled: false })
-      },
+      enabled: running,
+      click: () => stopMonitoring(),
     },
     { type: 'separator' },
     {
@@ -247,18 +308,84 @@ function createTray(): void {
       },
     },
   ])
-
-  // 左键唤出主界面，右键弹菜单（Windows 上 setContextMenu 会把左键也变成菜单）
-  tray.on('click', () => showMainWindow())
-  tray.on('right-click', () => tray?.popUpContextMenu(menu))
-  tray.on('double-click', () => showMainWindow())
 }
 
 // ===== 状态快照 CSV 导出 =====
 
 function csvEscape(v: unknown): string {
   const s = v == null ? '' : String(v)
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  // CSV 公式注入：Excel/WPS 会把 =、+、-、@、Tab 开头的单元格当公式执行（厂商名、
+  // 密钥备注、上游返回的错误文本都可能以这些字符开头）。前置单引号强制按文本处理。
+  const guarded = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s
+  return /[",\r\n]/.test(guarded) ? `"${guarded.replace(/"/g, '""')}"` : guarded
+}
+
+/**
+ * 去掉 JSONC 注释（// 行注释、/* *\/ 块注释），但跳过字符串内部的 `//`
+ * （例如 "baseURL": "https://…" 里的双斜杠）。
+ */
+function stripJsonComments(input: string): string {
+  let out = ''
+  let inStr = false
+  let inLine = false
+  let inBlock = false
+  let esc = false
+  for (let i = 0; i < input.length; i++) {
+    const c = input[i]
+    const n = input[i + 1]
+    if (inLine) {
+      if (c === '\n') {
+        inLine = false
+        out += c
+      }
+      continue
+    }
+    if (inBlock) {
+      if (c === '*' && n === '/') {
+        inBlock = false
+        i++
+      }
+      continue
+    }
+    if (inStr) {
+      out += c
+      if (esc) esc = false
+      else if (c === '\\') esc = true
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') {
+      inStr = true
+      out += c
+      continue
+    }
+    if (c === '/' && n === '/') {
+      inLine = true
+      i++
+      continue
+    }
+    if (c === '/' && n === '*') {
+      inBlock = true
+      i++
+      continue
+    }
+    out += c
+  }
+  return out
+}
+
+/**
+ * 改别人的配置文件前先留一份原始备份（只留第一次的那份，不会被后续导出覆盖）。
+ * 导出的写入是整文件重写，注释/排版会丢；有 .llm-monitor.bak 至少能还原。
+ */
+function backupConfigOnce(targetPath: string): void {
+  try {
+    if (!existsSync(targetPath)) return
+    const bak = `${targetPath}.llm-monitor.bak`
+    if (!existsSync(bak)) copyFileSync(targetPath, bak)
+  } catch {
+    // 备份失败不阻断导出
+  }
 }
 
 function buildStatusCsv(): string {
@@ -523,14 +650,13 @@ ipcMain.handle('monitor:start', (_event, _providerIds: string[], intervalMs: num
   // setConfig({enabled, intervalMs}) 内部已 stopAll + startAll 启动全部有密钥的
   // 供应商——下面的逐个 startProvider + startAll 是重复启动，会让打开/开始瞬间
   // 背靠背跑多轮探测（第一轮的"网络未就绪失败→下一轮成功"就是弹窗的来源）。
-  monitorEngine.setConfig({ enabled: true, intervalMs })
-  bindStatusPush()
+  // 统一走 startMonitoring：同时落盘 settings.enabled 并同步托盘/界面状态。
+  startMonitoring(intervalMs)
   return true
 })
 
 ipcMain.handle('monitor:stop', () => {
-  monitorEngine.stopAll()
-  monitorEngine.setConfig({ enabled: false })
+  stopMonitoring()
   return true
 })
 
@@ -719,10 +845,28 @@ ipcMain.handle(
       // ── TOML (Codex config) ──────────────────────────────────────
       if (targetPath.endsWith('.toml')) {
         let text = existsSync(targetPath) ? readFileSync(targetPath, 'utf-8') : ''
+        const HEAD = '[providers.llm-monitor]'
+        const START = '# --- LLM API Monitor 导出 ---'
+        // 只删「本工具写的那一段」，而不是从标记行一路删到文件末尾。以前用
+        // /\n# --- …[\s\S]*$/m 整段吞掉，用户在导出块后面追加的 [profiles.x]、
+        // [mcp_servers.*] 等配置会被静默删除（不可逆）。
+        const lines = text.split(/\r?\n/)
+        const startIdx = lines.findIndex((l) => l.trim() === START)
+        if (startIdx >= 0) {
+          let endIdx = lines.length
+          for (let i = startIdx + 1; i < lines.length; i++) {
+            const t = lines[i].trim()
+            if (t.startsWith('[') && t !== HEAD) {
+              endIdx = i
+              break
+            }
+          }
+          lines.splice(startIdx, endIdx - startIdx)
+          text = lines.join('\n')
+        }
         const block = [
-          '',
-          '# --- LLM API Monitor 导出 ---',
-          `[providers.llm-monitor]`,
+          START,
+          HEAD,
           `base_url = "${opts.baseUrl}"`,
           `api_key = "${opts.apiKey}"`,
           model ? `model = "${model}"` : '',
@@ -730,19 +874,19 @@ ipcMain.handle(
         ]
           .filter(Boolean)
           .join('\n')
-        text = text.replace(/\n# --- LLM API Monitor 导出 ---[\s\S]*$/m, '')
-        writeFileSync(targetPath, text.trimEnd() + '\n' + block, 'utf-8')
+        backupConfigOnce(targetPath)
+        const head = text.trimEnd()
+        writeFileSync(targetPath, (head ? `${head}\n\n` : '') + block + '\n', 'utf-8')
         return { ok: true, path: targetPath }
       }
 
       // ── MiMo Desktop mimocode.jsonc (JSONC + provider map) ──────
       if (opts.target === 'mimoDesktop') {
         const raw = existsSync(targetPath) ? readFileSync(targetPath, 'utf-8') : '{}'
-        // strip // line comments and /* */ blocks before parsing
-        const stripped = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+        // 去注释时不能误伤字符串里的 //（"https://…"），用状态机而不是正则。
         let data: Record<string, any>
         try {
-          data = JSON.parse(stripped)
+          data = JSON.parse(stripJsonComments(raw))
         } catch {
           return { ok: false, error: 'mimocode.jsonc 解析失败，已取消写入' }
         }
@@ -800,15 +944,23 @@ ipcMain.handle(
       }
 
       if (opts.target === 'claudeCode' || opts.target === 'gemini') {
-        data.env = {
-          ...(data.env ?? {}),
-          ANTHROPIC_API_KEY: opts.apiKey,
-          ANTHROPIC_BASE_URL: opts.baseUrl,
-          OPENAI_API_KEY: opts.apiKey,
-          OPENAI_BASE_URL: opts.baseUrl,
-          GEMINI_API_KEY: opts.apiKey,
-          GOOGLE_GEMINI_BASE_URL: opts.baseUrl,
+        // 只写本厂商那两个键。以前 claudeCode/gemini 一次性写 6 个 env（ANTHROPIC_/
+        // OPENAI_/GEMINI_ 全指到同一个监控端点），用户文件里原有的官方 key、别的
+        // 中转站配置会被永久覆盖，注释却写着 "without clobbering"。
+        if (opts.target === 'claudeCode') {
+          data.env = {
+            ...(data.env ?? {}),
+            ANTHROPIC_API_KEY: opts.apiKey,
+            ANTHROPIC_BASE_URL: opts.baseUrl,
+          }
+        } else {
+          data.env = {
+            ...(data.env ?? {}),
+            GEMINI_API_KEY: opts.apiKey,
+            GOOGLE_GEMINI_BASE_URL: opts.baseUrl,
+          }
         }
+        // model 只在调用方明确给了模型时才写，避免把用户自己选的默认模型改掉。
         if (model) data.model = model
       } else if (opts.target === 'cursorUser') {
         // Cursor mcp.json: record as a note under _llmMonitor so we don't
@@ -934,10 +1086,10 @@ app.whenReady().then(() => {
   // status pushes aren't dropped while mainWindow is still null.
   const settings = getSettings()
   if (settings.autoStart && Object.keys(getApiKeys()).length > 0) {
-    // setConfig 在 enabled + intervalMs 变化时内部已 stopAll + startAll——
-    // 这里再 startAll() 是重复启动，是"一打开软件就弹两个提示"的来源之一。
-    monitorEngine.setConfig({ enabled: true, intervalMs: settings.intervalMs })
-    bindStatusPush()
+    // 走统一入口：setConfig 内部已 stopAll + startAll（重复调用 startAll 是
+    // "一打开软件就弹两个提示"的来源之一）；同时把 settings.enabled 落盘，
+    // 界面/托盘读到的状态才和实际一致。
+    startMonitoring(settings.intervalMs)
   }
 
   app.on('activate', () => {
@@ -947,6 +1099,12 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   isQuitting = true
+  // 采样是攒 500ms 合批落盘的，退出前同步刷一次，别丢掉最后几秒的账。
+  try {
+    syncFlushSamples()
+  } catch (err) {
+    console.error('[store] flush before quit failed:', err)
+  }
 })
 
 app.on('window-all-closed', () => {

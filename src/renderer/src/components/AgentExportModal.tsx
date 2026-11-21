@@ -100,6 +100,15 @@ export default function AgentExportModal({ provider, apiKey, label, onClose }: P
     window.electronAPI.detectAgentConfigs().then(setCfgMap).catch(() => {})
   }, [])
 
+  // ESC 关闭：模态框盖住了整个界面，这是用户的第一反应。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   const envText = useMemo(() => buildEnv(provider, apiKey, model), [provider, apiKey, model])
   const jsonText = useMemo(() => buildJson(provider, apiKey, model), [provider, apiKey, model])
 

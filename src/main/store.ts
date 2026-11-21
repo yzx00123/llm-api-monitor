@@ -107,6 +107,8 @@ export interface BalanceSample {
   available: number
   /** 账号级钱包（一个登录号一份余额，多个密钥共用）。 */
   accountScope?: boolean
+  /** 账号级钱包所属的控制台账号 id（MiMo userId）；多账号必须分开记账。 */
+  accountId?: string
 }
 
 /** MiMo 控制台的累计用量样本（token 与金额都是累计值，按天做差值即可）。 */
@@ -152,17 +154,60 @@ function findLast<T>(rows: T[], match: (row: T) => boolean): T | undefined {
   return undefined
 }
 
+/*
+ * 采样数据的内存副本 + 合批落盘。
+ *
+ * electron-store 的 set 是「整个配置文件重写」：十几把密钥每 10 秒一轮探测，每把都会
+ * 触发一次 40KB+ 的 JSON 落盘（历史保留 200 天，只会越来越大），磁盘和 CPU 都是白烧。
+ * 现在采样先攒在内存里、最多 500ms 合并写一次；退出前 syncFlushSamples() 兜底。
+ */
+let balanceCache: BalanceSample[] | null = null
+let usageCache: UsageSample[] | null = null
+let probeUsageCache: Record<string, Record<string, ProbeUsageDay>> | null = null
+let sampleFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleSampleFlush(): void {
+  if (sampleFlushTimer) return
+  sampleFlushTimer = setTimeout(syncFlushSamples, 500)
+  // 不让这个定时器拖住进程退出；退出前 before-quit 会显式 flush 一次。
+  sampleFlushTimer.unref?.()
+}
+
+/** 把攒着的采样一次性写盘（退出前调用，丢掉最后 500ms 以内的数据太可惜）。 */
+export function syncFlushSamples(): void {
+  if (sampleFlushTimer) {
+    clearTimeout(sampleFlushTimer)
+    sampleFlushTimer = null
+  }
+  if (balanceCache) {
+    store.set('balanceHistory', pruneSamples(balanceCache))
+    balanceCache = null
+  }
+  if (usageCache) {
+    store.set('usageHistory', pruneSamples(usageCache))
+    usageCache = null
+  }
+  if (probeUsageCache) {
+    store.set('probeUsage', probeUsageCache)
+    probeUsageCache = null
+  }
+}
+
 export function getBalanceHistory(): BalanceSample[] {
-  return store.get('balanceHistory', [])
+  if (!balanceCache) balanceCache = store.get('balanceHistory', [])
+  return balanceCache
 }
 
 /** 追加一条余额样本；同钱包同金额的重复读数会被折叠。 */
 export function appendBalanceSample(sample: BalanceSample): void {
   if (!Number.isFinite(sample.available)) return
-  const rows = store.get('balanceHistory', [])
+  const rows = getBalanceHistory()
   const last = findLast(
     rows,
-    (row) => row.providerId === sample.providerId && row.keyIndex === sample.keyIndex
+    (row) =>
+      row.providerId === sample.providerId &&
+      row.keyIndex === sample.keyIndex &&
+      row.accountId === sample.accountId
   )
   if (
     last &&
@@ -173,16 +218,19 @@ export function appendBalanceSample(sample: BalanceSample): void {
     return
   }
   rows.push(sample)
-  store.set('balanceHistory', pruneSamples(rows))
+  // 裁剪留到落盘时做（pruneSamples），这里只防止内存无限增长。
+  if (rows.length > MAX_SAMPLES * 2) rows.splice(0, rows.length - MAX_SAMPLES)
+  scheduleSampleFlush()
 }
 
 export function getUsageHistory(): UsageSample[] {
-  return store.get('usageHistory', [])
+  if (!usageCache) usageCache = store.get('usageHistory', [])
+  return usageCache
 }
 
 /** 追加一条累计用量样本；累计值没变时不重复记录。 */
 export function appendUsageSample(sample: UsageSample): void {
-  const rows = store.get('usageHistory', [])
+  const rows = getUsageHistory()
   const last = findLast(rows, (row) => row.providerId === sample.providerId)
   if (
     last &&
@@ -193,7 +241,8 @@ export function appendUsageSample(sample: UsageSample): void {
     return
   }
   rows.push(sample)
-  store.set('usageHistory', pruneSamples(rows))
+  if (rows.length > MAX_SAMPLES * 2) rows.splice(0, rows.length - MAX_SAMPLES)
+  scheduleSampleFlush()
 }
 
 /** 本地日期键（与 report.ts 的 dateKey 一致：本地时区 YYYY-MM-DD）。 */
@@ -205,7 +254,8 @@ function dateKey(t: number): string {
 }
 
 export function getProbeUsage(): Record<string, Record<string, ProbeUsageDay>> {
-  return store.get('probeUsage', {})
+  if (!probeUsageCache) probeUsageCache = store.get('probeUsage', {})
+  return probeUsageCache
 }
 
 /**
@@ -218,7 +268,7 @@ export function appendProbeUsage(
   usage: { prompt: number; completion: number; total: number }
 ): void {
   if (!Number.isFinite(usage.total) || usage.total <= 0) return
-  const table = store.get('probeUsage', {})
+  const table = getProbeUsage()
   const day = dateKey(t)
   const perProvider = table[day] ?? {}
   const cur = perProvider[providerId] ?? { prompt: 0, completion: 0, total: 0 }
@@ -232,7 +282,7 @@ export function appendProbeUsage(
   for (const key of Object.keys(table)) {
     if (key < cutoff) delete table[key]
   }
-  store.set('probeUsage', table)
+  scheduleSampleFlush()
 }
 
 const store = new Store<StoreSchema>({
@@ -330,13 +380,14 @@ export function removeMimoSession(accountId: string): void {
 
 /**
  * 这把密钥（尾 6 位）属于哪个控制台账号。
- * 先按账号名下的 key 尾号匹配；老版本迁移过来的会话没有列表，退回用 boundBy。
+ * 先认「这次登录明确点的尾号」（boundBy），再按账号名下的 key 尾号列表匹配；
+ * 老版本迁移过来的会话没有列表，只能退回 boundBy。
  */
 export function findMimoSessionBySuffix(suffix: string): MimoSession | undefined {
   const list = getMimoSessions()
   return (
-    list.find((s) => s.keySuffixes.includes(suffix)) ??
-    list.find((s) => s.boundBy === suffix && s.keySuffixes.length === 0)
+    list.find((s) => s.boundBy === suffix) ??
+    list.find((s) => s.keySuffixes.includes(suffix))
   )
 }
 
@@ -345,14 +396,33 @@ export function findMimoSessionBySuffix(suffix: string): MimoSession | undefined
  * 控制台却突然要重新登录」。账号名下的 key 尾号等第一次查余额时再补拉。
  */
 export function migrateMimoSessions(): void {
-  const legacy = store.get('mimoCookie', '')
-  if (!legacy || store.get('mimoSessions', []).length > 0) return
-  const m = /(?:^|;\s*)userId=([^;]+)/.exec(legacy)
-  const accountId = m ? decodeURIComponent(m[1]) : `legacy-${Date.now()}`
-  store.set('mimoSessions', [
-    { accountId, cookie: legacy, keySuffixes: [], updatedAt: Date.now() },
-  ])
-  store.set('mimoCookie', '')
+  try {
+    const legacy = store.get('mimoCookie', '')
+    if (!legacy) return
+    // 已经有会话说明迁移过了（或用户重新登录过）：把老字段清掉，否则用户删光
+    // 会话后它会在下次启动时「复活」一个早就失效的账号。
+    if (store.get('mimoSessions', []).length > 0) {
+      store.set('mimoCookie', '')
+      return
+    }
+    const m = /(?:^|;\s*)userId=([^;]+)/.exec(legacy)
+    let accountId = `legacy-${Date.now()}`
+    if (m) {
+      try {
+        accountId = decodeURIComponent(m[1])
+      } catch {
+        // cookie 里的 userId 没做 URL 编码时 decodeURIComponent 会抛 URIError
+        accountId = m[1]
+      }
+    }
+    store.set('mimoSessions', [
+      { accountId, cookie: legacy, keySuffixes: [], updatedAt: Date.now() },
+    ])
+    store.set('mimoCookie', '')
+  } catch (err) {
+    // 迁移失败绝不能抛到 whenReady 外面：那样窗口都建不出来，双击图标毫无反应。
+    console.error('[mimo] session migration failed:', err)
+  }
 }
 
 export function addApiKey(providerId: string, keys: string[]): void {
@@ -376,6 +446,33 @@ export function removeApiKey(providerId: string, keyIndex: number): void {
     current[providerId] = keys
   }
   store.set('apiKeys', current)
+
+  // 历史余额样本是按 keyIndex 记账的：删掉一把 key 之后后面的索引整体前移，旧样本
+  // 会被算到「另一把 key」的钱包头上（账单里凭空多出消费）。这里同步前移并丢掉
+  // 属于被删那把 key 的样本，保证账本和新索引一一对应。
+  const rows = getBalanceHistory()
+  let changed = false
+  const kept: BalanceSample[] = []
+  for (const row of rows) {
+    if (row.providerId !== providerId || row.keyIndex < 0) {
+      kept.push(row)
+      continue
+    }
+    if (row.keyIndex === keyIndex) {
+      changed = true
+      continue
+    }
+    if (row.keyIndex > keyIndex) {
+      kept.push({ ...row, keyIndex: row.keyIndex - 1 })
+      changed = true
+      continue
+    }
+    kept.push(row)
+  }
+  if (changed) {
+    balanceCache = kept
+    scheduleSampleFlush()
+  }
 }
 
 export function getCustomProviders(): CustomProvider[] {

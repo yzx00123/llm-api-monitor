@@ -375,7 +375,28 @@ async function persistSession(cookie: string, boundBy?: string): Promise<MimoSes
  *    key 是否真属于该账号（登错号时界面提示用户）。
  * 4. 窗口提前关闭 / 5 分钟超时 → ok:false。
  */
+/**
+ * 正在进行的登录流程。连点「连接控制台」时复用同一个 Promise —— 以前每点一次就
+ * 新开一个登录窗口，两个窗口轮询同一个分区，会互相清 cookie、重复写会话（后完成的
+ * 那个还会覆盖 boundBy）。
+ */
+let loginInFlight: Promise<MimoConnectResult> | null = null
+
 export async function openMimoLoginWindow(
+  parent: BrowserWindow | null,
+  opts: { keySuffix?: string } = {}
+): Promise<MimoConnectResult> {
+  if (loginInFlight) return loginInFlight
+  const task = runMimoLogin(parent, opts)
+  loginInFlight = task
+  try {
+    return await task
+  } finally {
+    loginInFlight = null
+  }
+}
+
+async function runMimoLogin(
   parent: BrowserWindow | null,
   opts: { keySuffix?: string } = {}
 ): Promise<MimoConnectResult> {
@@ -470,6 +491,7 @@ export async function openMimoLoginWindow(
 
     timeoutTimer = setTimeout(() => fail('登录超时'), LOGIN_TIMEOUT_MS)
     win.on('closed', () => fail('登录窗口已关闭'))
-    void win.loadURL(startUrl)
+    // 加载失败（断网、SSO 域名被墙）不能变成未处理的 rejection：关窗并回报错误。
+    win.loadURL(startUrl).catch(() => fail('登录页加载失败，请检查网络后重试'))
   })
 }

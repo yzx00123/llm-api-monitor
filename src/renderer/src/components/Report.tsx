@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   DailyReport,
   ReportDay,
@@ -292,19 +292,25 @@ export default function Report({ onBack }: ReportProps): React.JSX.Element {
   const [exporting, setExporting] = useState(false)
   const [exportMsg, setExportMsg] = useState('')
 
+  // 请求序号：快速连点「近 7 天」→「近 30 天」时两个请求同时在飞，后发先至会让旧
+  // 结果覆盖新结果（按钮高亮 30 天、图表却是 7 天的数据）。只接受最新一次的结果。
+  const loadSeq = useRef(0)
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     try {
       const [daily, usageReport, tokenReport] = await Promise.all([
         window.electronAPI.getDailyReport(days, currency),
         window.electronAPI.getUsageReport(days),
         window.electronAPI.getTokenReport(days)
       ])
+      if (seq !== loadSeq.current) return
       setReport(daily)
       setUsage(usageReport)
       setToken(tokenReport)
       if (daily.currencies.length > 0 && !currency) setCurrency(daily.currencies[0])
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [days, currency])
 

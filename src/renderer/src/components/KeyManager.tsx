@@ -157,6 +157,16 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
     setBulkAssign('')
   }, [])
 
+  // 「无法识别密钥」的分配弹窗：ESC 等同于点 × 取消（否则键盘用户只能去点按钮）。
+  useEffect(() => {
+    if (unknownKeys.length === 0) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') cancelUnknownKeys()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [unknownKeys.length, cancelUnknownKeys])
+
   async function handleFileImport(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -166,13 +176,15 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
         const data = JSON.parse(text) as Array<Record<string, string>>
         const entries: Array<{ baseUrl: string; key: string }> = []
         for (const item of Array.isArray(data) ? data : [data]) {
-          const provider =
-            providers.find(
-              (p) =>
-                p.id === item.provider ||
-                p.name.toLowerCase() === item.provider?.toLowerCase() ||
-                p.baseUrl.includes(item.baseUrl || '')
-            ) ?? (item.baseUrl ? undefined : null)
+          // 只有带了 baseUrl 才按 baseUrl 做模糊匹配。以前写成
+          // `p.baseUrl.includes(item.baseUrl || '')`，item.baseUrl 为空时是
+          // includes('')，恒为 true —— 任何没写 baseUrl 的条目都会被塞进数组第一家
+          // （PROVIDERS[0]），provider 字段写对了也白写。
+          const wantedId = (item.provider ?? '').toLowerCase()
+          const byId = providers.find(
+            (p) => p.id === item.provider || p.name.toLowerCase() === wantedId
+          )
+          const provider = byId ?? (item.baseUrl ? providers.find((p) => p.baseUrl.includes(item.baseUrl)) : undefined)
           const baseUrl = provider?.baseUrl || item.baseUrl || ''
           const key = item.key || item.api_key || item.apiKey || item.token || ''
           if (baseUrl && key) entries.push({ baseUrl, key })
@@ -186,17 +198,28 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
         await onKeysChange(newKeys)
         setMsg(`从 ${file.name} 成功导入 ${entries.length} 个密钥`)
       } else if (file.name.endsWith('.csv') || file.name.endsWith('.txt')) {
-        const lines = parseKeysFromText(text)
+        // 按行切，再解析每行的「厂商,密钥」/「厂商|密钥」/全角逗号。
+        // 以前这里复用 parseKeysFromText —— 它内部按 /[\r\n,]+/ 切分，逗号在切行时
+        // 就被吃掉了，于是每行都不再包含分隔符，CSV 导入恒为 0 条却提示「成功导入」。
+        const rawLines = text
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0 && !l.startsWith('#'))
         const entries: Array<{ baseUrl: string; key: string }> = []
-        for (const line of lines) {
-          if (line.includes('|') || line.includes(',')) {
-            const [a, b] = line.split(/[,|]/).map((s) => s.trim())
-            const provider = providers.find(
-              (p) => p.id === a.toLowerCase() || p.baseUrl.includes(a)
-            )
-            const baseUrl = provider?.baseUrl || a
-            entries.push({ baseUrl, key: b })
-          }
+        for (const line of rawLines) {
+          const parts = line.split(/[,|，\t]/).map((s) => s.trim())
+          if (parts.length < 2) continue
+          const [a, b] = parts
+          if (!a || !b) continue
+          const provider = providers.find(
+            (p) =>
+              p.id === a.toLowerCase() ||
+              p.name.toLowerCase() === a.toLowerCase() ||
+              p.baseUrl.includes(a)
+          )
+          const baseUrl = provider?.baseUrl || (a.includes('://') ? a : '')
+          if (!baseUrl) continue
+          entries.push({ baseUrl, key: b })
         }
         const matched = await window.electronAPI.importCustom(entries)
         const newKeys: Record<string, string[]> = { ...keys }
@@ -205,7 +228,11 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
           if (!newKeys[m.providerId].includes(m.key)) newKeys[m.providerId].push(m.key)
         }
         await onKeysChange(newKeys)
-        setMsg(`从 ${file.name} 成功导入 ${entries.length} 个密钥`)
+        setMsg(
+          entries.length > 0
+            ? `从 ${file.name} 成功导入 ${entries.length} 个密钥`
+            : `没有从 ${file.name} 解析出密钥：每行格式应为「厂商,密钥」或「厂商|密钥」`
+        )
       }
     } catch (err) {
       setMsg('文件解析失败：' + (err instanceof Error ? err.message : String(err)))

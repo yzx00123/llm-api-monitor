@@ -111,15 +111,26 @@ export default function App() {
       const t = ((settings as { theme?: ThemeMode }).theme ?? 'system')
       setTheme(t)
       applyTheme(t)
-      // Main process auto-started polling before the window opened — reflect
-      // that in the header so it shows ■ 停止 instead of ▶ 开始.
-      if ((settings as { autoStart?: boolean }).autoStart && Object.keys(ks).length > 0) {
-        setMonitoring(true)
-      }
+      // 主进程是否真的在轮询，只有它自己知道：读 settings.enabled（开始/停止都会
+      // 落盘），老配置没有这个字段时退回「autoStart 且有密钥」的旧猜测。
+      const persistedEnabled = (settings as { enabled?: boolean }).enabled
+      setMonitoring(
+        typeof persistedEnabled === 'boolean'
+          ? persistedEnabled
+          : Boolean((settings as { autoStart?: boolean }).autoStart && Object.keys(ks).length > 0)
+      )
       // First-run tutorial dialog
       if (!(settings as { onboarded?: boolean }).onboarded) {
         setShowOnboarding(true)
       }
+    })
+  }, [])
+
+  // 跟随主进程的真实监测状态：托盘点「开始/停止」、或主进程自动恢复轮询时，
+  // 窗口里的按钮不能还停在旧状态（以前托盘点停止后界面仍显示「■ 停止」）。
+  useEffect(() => {
+    return window.electronAPI.onMonitoringState(({ monitoring: running }) => {
+      setMonitoring(Boolean(running))
     })
   }, [])
 
@@ -291,7 +302,13 @@ export default function App() {
         ) : _viewId === 'providers' ? (
           <ProviderManager
             providers={providers}
-            onProvidersChange={setProviders}
+            onProvidersChange={(next) => {
+              setProviders(next)
+              // 删除自定义供应商时主进程会连同它的密钥一起删；界面这边如果还留着
+              // 旧的 keys 条目，下次在密钥管理里保存就会把已删供应商的密钥写回去
+              // （幽灵密钥）。所以供应商变化后重新拉一次真实密钥表。
+              void window.electronAPI.getKeys().then(setKeys)
+            }}
             onBack={() => setView('dashboard')}
           />
         ) : _viewId === 'report' ? (

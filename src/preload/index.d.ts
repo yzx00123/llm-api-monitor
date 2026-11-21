@@ -94,6 +94,8 @@ export interface ElectronAPI {
     model?: string
   }) => Promise<{ ok: boolean; path?: string; error?: string }>
   onStatusUpdate: (callback: (statuses: Record<string, ProviderStatus>) => void) => () => void
+  /** 监测开关的真实状态（托盘里点开始/停止、主进程自动恢复轮询都会推送） */
+  onMonitoringState: (callback: (state: { monitoring: boolean }) => void) => () => void
 }
 
 export interface LatencyTestResult {

@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import type { Provider, ProviderStatus } from '../preload'
 import AgentExportModal from './AgentExportModal'
 
@@ -110,6 +110,21 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
   const [connecting, setConnecting] = useState(false)
   const [showExport, setShowExport] = useState(false)
   const [copied, setCopied] = useState(false)
+  // 登录提示不要用 window.alert：它是同步阻塞的，会把整个渲染进程（包括所有卡片的
+  // 状态刷新）卡在弹窗上，直到用户点确定。改成卡片内的短暂提示。
+  const [notice, setNotice] = useState('')
+  const [, forceTick] = useState(0)
+
+  // 限流徽标是按「当前时间」算出来的，但冷却期内主进程不再推状态，倒计时到点后卡片
+  // 不会自己重画，徽标就会一直挂着那个已经过去的时刻。到点主动重渲染一次把它摘掉。
+  useEffect(() => {
+    if (throttledUntil <= Date.now()) return
+    const timer = setTimeout(
+      () => forceTick((n) => n + 1),
+      Math.min(throttledUntil - Date.now() + 200, 16 * 60 * 1000)
+    )
+    return () => clearTimeout(timer)
+  }, [throttledUntil])
 
   const handleCopyKey = async () => {
     if (!fullKey) return
@@ -130,10 +145,10 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
       // 想连 7001 的账号就点 7001 的按钮，不会被自动登回 7002 的账号。
       const res = await window.electronAPI.mimoConnect(fullKey.slice(-6))
       if (res?.ok && res.keyFound === false) {
-        window.alert(
-          `刚登录的小米账号（${res.accountId ?? '未知'}）名下没有这把密钥（…${fullKey.slice(-6)}）。\n` +
-            '说明登错账号了：请再点一次这一张卡片的「连接控制台」，登录它所属的那个小米账号。'
+        setNotice(
+          `刚登录的小米账号（${res.accountId ?? '未知'}）名下没有…${fullKey.slice(-6)} 这把密钥，登错账号了：再点一次「连接控制台」登录它所属的账号`
         )
+        setTimeout(() => setNotice(''), 12_000)
       }
     } finally {
       setConnecting(false)
@@ -225,6 +240,11 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
               title={`被厂商限流（429），将于 ${new Date(throttledUntil).toLocaleTimeString('zh-CN', { hour12: false })} 自动重试`}
             >
               限流 {formatClock(throttledUntil)}
+            </span>
+          )}
+          {notice && (
+            <span className="box-balance box-throttle" title={notice}>
+              登错账号？
             </span>
           )}
         </span>

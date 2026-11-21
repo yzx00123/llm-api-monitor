@@ -115,35 +115,44 @@ export default function LatencyTest({ providers, keys, keyLabels, onBack, embedd
       return
     }
     let cancelled = false
-    setModelsLoading(true)
-    setModelsError('')
-    window.electronAPI
-      .listModels(providerId, effectiveKey)
-      .then((res) => {
-        if (cancelled) return
-        if (res.ok && res.models.length > 0) {
-          setApiModels(res.models)
-          setModel((m) => (m && res.models.includes(m) ? m : res.models[0] ?? ''))
-        } else {
-          setApiModels([])
-          setModelsError(res.error || '未能拉取模型列表')
-          const p = providers.find((x) => x.id === providerId)
-          if (p && p.models.length) setModel((m) => m || p.models[0])
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setApiModels([])
-          setModelsError(err instanceof Error ? err.message : String(err))
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setModelsLoading(false)
-      })
+    let timer: number | undefined
+    const run = (): void => {
+      setModelsLoading(true)
+      setModelsError('')
+      window.electronAPI
+        .listModels(providerId, effectiveKey)
+        .then((res) => {
+          if (cancelled) return
+          if (res.ok && res.models.length > 0) {
+            setApiModels(res.models)
+            setModel((m) => (m && res.models.includes(m) ? m : res.models[0] ?? ''))
+          } else {
+            setApiModels([])
+            setModelsError(res.error || '未能拉取模型列表')
+            const p = providers.find((x) => x.id === providerId)
+            if (p && p.models.length) setModel((m) => m || p.models[0])
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setApiModels([])
+            setModelsError(err instanceof Error ? err.message : String(err))
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setModelsLoading(false)
+        })
+    }
+    // 手动粘贴 key 时是逐字符输入：每敲一个字符就真发一次 /models（50 字符 ≈ 50 个
+    // 上游请求，很容易触发 429，模型列表还会被中间态覆盖）。这里加 400ms 防抖；
+    // 选现成 key 时保持即时拉取。
+    if (useCustomKey) timer = window.setTimeout(run, 400)
+    else run()
     return () => {
       cancelled = true
+      if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [providerId, effectiveKey, providers, fetchSeq])
+  }, [providerId, effectiveKey, providers, fetchSeq, useCustomKey])
 
   const refreshModels = useCallback(() => setFetchSeq((s) => s + 1), [])
 
@@ -268,7 +277,12 @@ export default function LatencyTest({ providers, keys, keyLabels, onBack, embedd
                 min={1}
                 max={4096}
                 value={probeMaxTokens}
-                onChange={(e) => setProbeMaxTokens(Math.max(1, Number(e.target.value) || 64))}
+                onChange={(e) => {
+                  // 输入时就夹到 [1, 4096]：以前只在「保存」时 clamp，输入框还留着
+                  // 99999，再点「立即测试」会按 99999 真发请求，界面和持久化值长期不一致。
+                  const n = Math.floor(Number(e.target.value) || 0)
+                  setProbeMaxTokens(Math.min(4096, Math.max(1, n || 64)))
+                }}
               />
               <div className="latency-hint">建议 ≤ 64，探测更快也更省 token</div>
             </div>

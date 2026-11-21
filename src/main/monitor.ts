@@ -70,6 +70,11 @@ export interface BalanceSampleEvent {
   currency: string
   available: number
   accountScope?: boolean
+  /**
+   * 账号级钱包的账号 id（MiMo 控制台 userId）。多个小米账号各自一个钱包，
+   * 账单必须按账号分开累计，否则 A 账号的余额下降会被算到 B 账号头上。
+   */
+  accountId?: string
 }
 
 /** MiMo 控制台的累计用量采样（token / 金额都是累计值）。 */
@@ -144,10 +149,20 @@ export class MonitorEngine {
   unregisterProvider(id: string) {
     this.registry.delete(id)
     this.removeKeys(id)
-    this.statuses.delete(id)
-    for (const sk of [...this.history.keys()]) if (sk.startsWith(`${id}#`)) this.history.delete(sk)
-    for (const sk of [...this.stableState.keys()]) if (sk.startsWith(`${id}#`)) this.stableState.delete(sk)
-    for (const sk of [...this.brokeConfirmAt.keys()]) if (sk.startsWith(`${id}#`)) this.brokeConfirmAt.delete(sk)
+    // statuses / history / throttle 这些表的键都是 `${providerId}#${keyIndex}`，不是
+    // providerId 本身 —— 以前这里写成 this.statuses.delete(id)，一个都删不掉：删掉自定义
+    // 供应商后幽灵状态还留在 Map 里（内存泄漏，也会被当成真实状态推给界面）。
+    const prefix = `${id}#`
+    const purge = <T>(map: Map<string, T>): void => {
+      for (const sk of [...map.keys()]) if (sk.startsWith(prefix)) map.delete(sk)
+    }
+    purge(this.statuses)
+    purge(this.history)
+    purge(this.stableState)
+    purge(this.brokeConfirmAt)
+    purge(this.throttle)
+    purge(this.lastBalanceAt)
+    purge(this.failCount)
     this.onStatusChange?.(this.statuses)
   }
 
@@ -171,23 +186,77 @@ export class MonitorEngine {
    * Monitoring off → probe once but never start a polling timer.
    */
   setKeys(providerId: string, keys: string[], probeNew?: number[]) {
+    const prevKeys = this.keys.get(providerId) ?? []
+    // 先按 key 字符串把状态搬到新索引上，再换 keys 数组：否则删掉中间一把 key 后，
+    // 后面的 key 会整段错位——新 key 继承被删 key 的余额/延迟/错误码，若被删的那把
+    // 正处于 429 退避（最长 15 分钟），新 key 在退避期内完全不探测却挂着「限流」。
+    this.remapKeyStates(providerId, prevKeys, keys)
     this.keys.set(providerId, keys)
-    if (probeNew && probeNew.length > 0) {
-      if (this.config.enabled && !this.timers.has(providerId)) {
-        // Brand-new provider while monitoring is on — startProvider probes
-        // right away and starts the interval.
+
+    // 只探「这把是新来的」。删掉一把 key 或者只是重排列表时，以前会走 startProvider
+    // 或 checkProvider 把剩下的 key 全部重测一遍 —— 每次探测都要真打一次上游（花
+    // token），用户对这笔账很敏感，纯删除操作不该产生任何请求。
+    const added =
+      probeNew && probeNew.length > 0
+        ? probeNew
+        : keys.map((_, i) => i).filter((i) => !prevKeys.includes(keys[i]))
+
+    if (this.config.enabled) {
+      if (!this.timers.has(providerId)) {
+        // 全新 provider：立即探测一次并建立轮询。
         this.startProvider(providerId)
-      } else {
-        void this.probeNow(providerId, probeNew)
+      } else if (added.length > 0) {
+        void this.probeNow(providerId, added)
       }
+      // 删除 / 重排：既有轮询照常跑，本轮不额外探测。
       return
     }
-    if (this.config.enabled) {
-      this.startProvider(providerId)
-    } else {
-      // Monitoring stopped: still probe once so the import gives feedback,
-      // but do not resurrect a polling timer.
-      void this.checkProvider(providerId)
+
+    // 监测关闭：只有「新导入」才探一次给个反馈，删 key 不花 token。
+    if (added.length > 0) void this.probeNow(providerId, added)
+  }
+
+  /**
+   * 按 key 字符串把「以 `${providerId}#${index}` 为键」的所有状态表重映射到新索引。
+   *
+   * 存在的理由：这些表原来只按索引记账，删掉中间一把 key 后后面全体前移，新 key 会
+   * 继承旧 key 的在线状态、限流退避、失败计数（failCount≥3 时一次偶发失败就直接判掉线
+   * 并弹通知）。现在保留「同一把 key」的状态、丢掉被删 key 的条目。
+   */
+  private remapKeyStates(providerId: string, prevKeys: string[], nextKeys: string[]): void {
+    const prefix = `${providerId}#`
+    const oldIndexOf = new Map<string, number>()
+    prevKeys.forEach((k, i) => {
+      if (k && !oldIndexOf.has(k)) oldIndexOf.set(k, i)
+    })
+    const fromTo: Array<[number, number]> = []
+    nextKeys.forEach((k, to) => {
+      const from = oldIndexOf.get(k)
+      if (from !== undefined) fromTo.push([from, to])
+    })
+
+    const remap = <T>(map: Map<string, T>): Map<string, T> => {
+      const out = new Map<string, T>()
+      for (const [sk, v] of map) if (!sk.startsWith(prefix)) out.set(sk, v)
+      for (const [from, to] of fromTo) {
+        const v = map.get(`${prefix}${from}`)
+        if (v !== undefined) out.set(`${prefix}${to}`, v)
+      }
+      return out
+    }
+
+    this.statuses = remap(this.statuses)
+    this.history = remap(this.history)
+    this.stableState = remap(this.stableState)
+    this.brokeConfirmAt = remap(this.brokeConfirmAt)
+    this.throttle = remap(this.throttle)
+    this.lastBalanceAt = remap(this.lastBalanceAt)
+    this.failCount = remap(this.failCount)
+    // 状态对象里也存了一份 keyIndex，界面按它找卡片，一起改掉。
+    for (const [sk, st] of this.statuses) {
+      if (!sk.startsWith(prefix)) continue
+      const idx = Number(sk.slice(prefix.length))
+      if (st.keyIndex !== idx) this.statuses.set(sk, { ...st, keyIndex: idx })
     }
   }
 
@@ -271,6 +340,7 @@ export class MonitorEngine {
       currency: info.currency,
       available: info.available,
       accountScope: info.accountScope,
+      accountId: info.accountId,
     })
   }
 
@@ -306,7 +376,9 @@ export class MonitorEngine {
       clearInterval(this.brokePollTimer)
       this.brokePollTimer = null
     }
-    this.brokeConfirmAt.clear()
+    // 不在这里清 brokeConfirmAt：探测窗口内状态瞬时变化时 broke 名单可能暂时为空，
+    // 清掉冷却会让「余额接口显示有钱但 key 仍 429」的确认探测变成每 10 秒一次地烧
+    // token。真正的停止（stopAll）才清。
   }
 
   private async pollBrokeKeys(): Promise<void> {
@@ -328,7 +400,9 @@ export class MonitorEngine {
         const provider = this.resolve(providerId)
         const key = this.keys.get(providerId)?.[keyIndex]
         if (!provider || !key) continue
-        await this.checkBalance(provider, key, providerId, sk)
+        // 欠费轮询要求「充值后 5~10 秒就能发现」，所以必须跳过账号级 60 秒缓存真查一次；
+        // 余额接口本身免费，不消耗 token。
+        await this.checkBalance(provider, key, providerId, sk, { skipCache: true })
         const st = this.statuses.get(sk)
         if (!st || st.errorCode !== '余额不足，无法调用') continue
         const money = st.balanceInfo?.available ?? 0
@@ -347,6 +421,11 @@ export class MonitorEngine {
     return new Map(this.statuses)
   }
 
+  /** 当前是否在轮询。界面按钮、托盘菜单都以它为准，避免两边各记一份状态。 */
+  isEnabled(): boolean {
+    return this.config.enabled
+  }
+
   startAll() {
     if (!this.config.enabled) return
     for (const id of this.keys.keys()) {
@@ -360,6 +439,11 @@ export class MonitorEngine {
       this.timers.delete(id)
     }
     this.pendingRecheck.clear()
+    // 队列里排着的 provider 也要清掉：否则 finally 里的出队逻辑会在「已停止」之后接着
+    // 一轮轮真探测（花 token、可能把 key 打进 429 退避），用户点了停止却还在打上游。
+    this.queue.length = 0
+    // 冷却时间表只在真正停止时清空（运行中不能清：欠费轮询靠它做 60 秒确认节流）。
+    this.brokeConfirmAt.clear()
     this.stopBrokePoll()
   }
 
@@ -402,7 +486,9 @@ export class MonitorEngine {
     if (this.runningCount >= this.maxConcurrent) {
       // Queue dedup: the same provider can be re-queued many times while it is
       // waiting (interval fires, manual checkNow, key edit) — one slot is enough.
-      if (!this.queue.includes(providerId)) this.queue.push(providerId)
+      // 停止监测时不再入队：队列只服务于轮询，手动检测（检查按钮/新导入）不该被
+      // 悄悄存起来在后台补跑。
+      if (this.config.enabled && !this.queue.includes(providerId)) this.queue.push(providerId)
       return
     }
 
@@ -438,6 +524,11 @@ export class MonitorEngine {
           lastChecked: Date.now(),
           authStatus: prev?.authStatus ?? 'unknown',
           balanceInfo: prev?.balanceInfo ?? null,
+          // 保留上一条状态里的错误码与退避时间：checking 是瞬态，但 pollBrokeKeys
+          // 是按 errorCode 找「没钱 key」的，整段覆盖会让它在探测窗口内从名单里消失
+          // （只剩一把时 broke 变空 → stopBrokePoll），充值后反而发现不了恢复。
+          errorCode: prev?.errorCode,
+          throttledUntil: prev?.throttledUntil,
         })
 
         // Balance refresh in parallel with the latency probe
@@ -483,16 +574,24 @@ export class MonitorEngine {
               })
               return
             }
-            const stillOnline = before?.authStatus === 'valid'
+            // 429 不该改变「稳定状态」：以前这里写 online/idle，把已通知过掉线的 key
+            // 写成 idle 会触发一次假「已恢复」，真恢复时反而不报了。现在沿用上一次
+            // 的稳定状态与错误码，只挂退避时间。
+            const stable = this.stableState.get(sk)?.status
+            const keepStatus: ProviderStatus['status'] =
+              stable === 'online' || stable === 'error' || stable === 'offline' ? stable : 'idle'
             const until = this.noteThrottle(sk, result.retryAfterMs)
             this.updateStatus(sk, {
               providerId,
               keyIndex,
               keyMask,
-              status: stillOnline ? 'online' : 'idle',
+              status: keepStatus,
               latency: before?.latency ?? null,
               latencyHistory: this.historyFor(sk),
-              errorCode: stillOnline ? '被限流，稍后自动重试' : result.error,
+              errorCode:
+                keepStatus === 'online'
+                  ? '被限流，稍后自动重试'
+                  : (before?.errorCode ?? result.error),
               lastChecked: Date.now(),
               authStatus: before?.authStatus ?? 'unknown',
               balanceInfo: before?.balanceInfo ?? null,
@@ -579,8 +678,8 @@ export class MonitorEngine {
       if (this.pendingRecheck.delete(providerId)) {
         void this.checkProvider(providerId)
       }
-      // Process next queued provider if any
-      if (this.queue.length > 0 && this.runningCount < this.maxConcurrent) {
+      // Process next queued provider if any（停止监测后不再续跑）
+      if (this.config.enabled && this.queue.length > 0 && this.runningCount < this.maxConcurrent) {
         const nextId = this.queue.shift()!
         this.checkProvider(nextId)
       }
@@ -596,8 +695,21 @@ export class MonitorEngine {
     return `${key.slice(0, 6)}••••${key.slice(-4)}`
   }
 
+  /**
+   * 金额字段统一归一化成数字。上游有时回字符串（`{"balance":"0.88"}`），直接塞进
+   * BalanceInfo 会让 recordBalanceSample 的 Number.isFinite 判断失败、采样被静默
+   * 丢弃 —— 卡片上看着有余额，账单页「今日消费」却永远是 0。顺带修掉
+   * `x ? parseFloat(x) : undefined` 这种把数值 0 当空值的老写法。
+   */
+  static toAmount(raw: unknown): number | undefined {
+    if (raw === null || raw === undefined || raw === '') return undefined
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : undefined
+  }
+
   /** 402 or "insufficient balance"-style errors mean the key has no money. */
   static isOutOfMoney(result: { status?: number; error?: string }): boolean {
+
     if (result.status === 402) return true
     const e = result.error ?? ''
     return /insufficient.{0,20}balance|余额不足|insufficient_quota|quota.{0,10}exceeded|credit|欠费|no.{0,10}funds/i.test(e)
@@ -705,8 +817,10 @@ export class MonitorEngine {
         }),
         signal: controller.signal,
       })
-      clearTimeout(timeout)
 
+      // 注意：超时不能在读完响应头就清掉 —— 上游可能先返回 headers 再挂住 body，
+      // 那样 abort 定时器已经失效，读取会退化到系统默认（数百秒），inFlight 长挂、
+      // 卡片停在「检测中」。clearTimeout 统一放在 finally 里（body 读完之后）。
       const text = await resp.text()
       if (resp.ok) {
         // Some gateways return HTTP 200 with an error payload (e.g. MiniMax
@@ -816,8 +930,9 @@ export class MonitorEngine {
         }),
         signal: controller.signal,
       })
-      clearTimeout(timeout)
 
+      // 超时定时器留到 finally 再清：body 读取可能比响应头慢得多（见
+      // testOpenAICompatible 注释）。
       if (resp.ok) {
         // 读 body 拿 usage（Anthropic 用 input_tokens/output_tokens）。
         const text = await resp.text()
@@ -884,8 +999,8 @@ export class MonitorEngine {
         }),
         signal: controller.signal,
       })
-      clearTimeout(timeout)
 
+      // 超时定时器留到 finally 再清（见 testOpenAICompatible 注释）。
       if (resp.ok) {
         // 读 body 拿 usage（Gemini 用 usageMetadata.promptTokenCount/...）。
         const text = await resp.text()
@@ -922,7 +1037,13 @@ export class MonitorEngine {
     }
   }
 
-  private async checkBalance(provider: Provider, key: string, providerId: string, statusKey: string) {
+  private async checkBalance(
+    provider: Provider,
+    key: string,
+    providerId: string,
+    statusKey: string,
+    opts: { skipCache?: boolean } = {}
+  ) {
     try {
       if (!provider.balanceUrl) return
 
@@ -954,7 +1075,7 @@ export class MonitorEngine {
 
         const cached = this.mimoAccountCache.get(sess.accountId)
         let info: BalanceInfo | null
-        if (cached && Date.now() - cached.at < 60_000) {
+        if (!opts.skipCache && cached && Date.now() - cached.at < 60_000) {
           info = cached.info
         } else {
           const res = await fetchMimoBalance(sess.cookie)
@@ -998,15 +1119,22 @@ export class MonitorEngine {
 
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 8000)
-      let resp: Response
+      let data: any
       try {
-        resp = await fetch(provider.balanceUrl, { headers, signal: controller.signal })
+        const resp = await fetch(provider.balanceUrl, { headers, signal: controller.signal })
+        // 401/403 = 密钥被吊销/禁用：余额已经没有意义，清掉别让卡片继续显示上次的
+        // 正数（用户会以为还有钱）。其它非 2xx 保留旧值，等下一轮再试。
+        if (resp.status === 401 || resp.status === 403) {
+          this.applyBalance(statusKey, null)
+          return
+        }
+        if (!resp.ok) return
+        // 超时定时器覆盖到 body 读完（与探测器同理：只拿到响应头不算完）。
+        data = await resp.json()
       } finally {
         clearTimeout(timeout)
       }
-      if (!resp.ok) return
 
-      const data = await resp.json()
       let info: BalanceInfo = { currency: 'USD', raw: data }
 
       if (providerId === 'deepseek') {
@@ -1014,9 +1142,9 @@ export class MonitorEngine {
         const b = data.balance_infos?.[0]
         info = {
           currency: b?.currency ?? 'CNY',
-          available: b?.total_balance ? parseFloat(b.total_balance) : undefined,
-          total_granted: b?.granted_balance ? parseFloat(b.granted_balance) : undefined,
-          total_used: b?.topped_up_balance ? parseFloat(b.topped_up_balance) : undefined,
+          available: MonitorEngine.toAmount(b?.total_balance),
+          total_granted: MonitorEngine.toAmount(b?.granted_balance),
+          total_used: MonitorEngine.toAmount(b?.topped_up_balance),
           raw: data,
         }
       } else if (providerId === 'moonshot') {
@@ -1024,34 +1152,34 @@ export class MonitorEngine {
         const d = data.data ?? data
         info = {
           currency: 'CNY',
-          available: d.available_balance ?? d.balance?.available,
-          total_granted: d.voucher_balance,
+          available: MonitorEngine.toAmount(d.available_balance ?? d.balance?.available),
+          total_granted: MonitorEngine.toAmount(d.voucher_balance),
           raw: data,
         }
       } else if (providerId === 'siliconflow') {
         const d = data.data ?? data
         info = {
           currency: 'CNY',
-          available: d.balance ?? d.available,
+          available: MonitorEngine.toAmount(d.balance ?? d.available),
           raw: data,
         }
       } else {
         // generic fallback: look for any obvious balance field
         const d = data.data ?? data
-        const v = d.balance ?? d.available ?? d.available_balance ?? d.remainder
-        if (v != null && !isNaN(parseFloat(v))) {
-          info = { currency: data.currency ?? data.unit ?? 'CNY', available: parseFloat(v), raw: data }
+        const v = MonitorEngine.toAmount(
+          d.balance ?? d.available ?? d.available_balance ?? d.remainder
+        )
+        if (v !== undefined) {
+          info = { currency: data.currency ?? data.unit ?? 'CNY', available: v, raw: data }
         } else {
           return // can't parse — don't display partial info
         }
       }
 
-      const status = this.statuses.get(statusKey)
-      if (status) {
-        status.balanceInfo = info
-        this.recordBalanceSample(status, info)
-        this.onStatusChange?.(this.statuses)
-      }
+      // 走统一的 applyBalance：它带「探测器已判定没钱时，不允许余额接口把 0 覆盖成
+      // 有钱」的守卫。以前这里直接改 status.balanceInfo，Moonshot 这类欠费但仍能查到
+      // 残留余额的账号会出现「卡片显示有余额、实际调用全 429」的矛盾状态。
+      this.applyBalance(statusKey, info)
     } catch {
       // balance check failures are non-critical
     }
@@ -1129,6 +1257,33 @@ export class MonitorEngine {
     const sk = this.statusKey(providerId, keyIndex)
     const prev = this.statuses.get(sk)
     const outOfMoney = result.error ? MonitorEngine.isOutOfMoney({ status: result.status, error: result.error }) : false
+
+    // 测延迟失败（429/超时/网络抖动）只刷新「上次检测时间」和延迟环，不改在线状态、
+    // 不动失败计数：自动轮询要连续 3 次失败才降级，一句话没测通就把卡片打成「掉线」
+    // 并弹通知是两套不一致的判据（还会绕过粘性在线门限）。欠费（402/insufficient）
+    // 例外，走下面正常的 broke 逻辑。
+    if (!result.ok && !outOfMoney) {
+      this.updateStatus(sk, {
+        ...(prev ?? {
+          providerId,
+          keyIndex,
+          keyMask: MonitorEngine.maskKey(key),
+          status: 'idle' as const,
+          latency: null,
+          lastChecked: Date.now(),
+          authStatus: 'unknown' as const,
+          balanceInfo: null,
+        }),
+        providerId,
+        keyIndex,
+        keyMask: MonitorEngine.maskKey(key),
+        latencyHistory: this.historyFor(sk),
+        errorCode: prev?.errorCode,
+        lastChecked: Date.now(),
+      })
+      this.lastBalanceAt.delete(sk)
+      return
+    }
 
     if (result.ok && result.latencyMs >= 0) this.pushHistory(sk, result.latencyMs)
     this.updateStatus(sk, {

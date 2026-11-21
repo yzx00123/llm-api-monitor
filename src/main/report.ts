@@ -132,7 +132,11 @@ function providerName(providerId: string): string {
 
 /** 钱包标识：账号级钱包整个账号一份，其他按「供应商 + 密钥序号」区分。 */
 function walletKey(sample: BalanceSample): string {
-  if (sample.accountScope || sample.keyIndex === -1) return `${sample.providerId}#account`
+  if (sample.accountScope || sample.keyIndex === -1) {
+    // 账号级钱包必须按账号分开：MiMo 每个控制台账号各有一个钱包，混成一个桶会把
+    // A 账号的余额下降算成 B 账号的消费（多账号用户账单会完全失真）。
+    return `${sample.providerId}#account:${sample.accountId ?? 'unknown'}`
+  }
   return `${sample.providerId}#${sample.keyIndex}`
 }
 
@@ -530,8 +534,11 @@ export function buildReportCsv(days: number, currency?: string): string {
     }
     rows.push(cells.map(csvCell).join(','))
   }
+  // 合计行必须和上面的明细窗口对齐：以前用 totals.all（全部历史），表里明明只有
+  // 最近 30 天的行，合计却是几年的总额，一眼就看得出对不上。
+  const windowTotal = roundMoney(report.days.reduce((sum, day) => sum + day.total, 0))
   rows.push(
-    ['合计', report.totals.all, ...report.providerTotals.map((p) => p.amount)]
+    ['合计', windowTotal, ...report.providerTotals.map((p) => p.amount)]
       .map(csvCell)
       .join(',')
   )
@@ -543,7 +550,10 @@ export function buildReportCsv(days: number, currency?: string): string {
     for (const day of usage.days) {
       rows.push([day.date, day.tokens, day.cost].map(csvCell).join(','))
     }
-    rows.push(['累计', usage.totalToken ?? 0, usage.monthCost ?? 0].map(csvCell).join(','))
+    // 「累计」应该是全时段累计花费；以前这里写的是 monthCost（本月），列名骗人。
+    rows.push(
+      ['累计', usage.totalToken ?? 0, usage.totalCost ?? 0].map(csvCell).join(',')
+    )
   }
 
   return '\uFEFF' + rows.join('\r\n') + '\r\n'

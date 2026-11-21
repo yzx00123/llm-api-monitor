@@ -114,6 +114,31 @@ export default function ProviderManager({ providers, onProvidersChange, onBack }
       flash('请填写名称和 API 端点')
       return
     }
+    // 端点必须是合法的 http(s) URL。以前只是 trim 后落库，写成 `api.example.com/v1`
+    // 也能保存，之后每次探测都失败、卡片显示英文的 "Failed to parse URL from …"，
+    // 用户根本看不出是地址格式问题。顺手补上协议、去掉末尾斜杠。
+    const normalizeUrl = (raw: string): string | null => {
+      const t = raw.trim()
+      if (!t) return null
+      const withProto = /^[a-z][a-z0-9+.-]*:\/\//i.test(t) ? t : `https://${t}`
+      try {
+        const u = new URL(withProto)
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+        return withProto.replace(/\/+$/, '')
+      } catch {
+        return null
+      }
+    }
+    const baseUrl = normalizeUrl(form.baseUrl)
+    if (!baseUrl) {
+      flash('API 端点格式不对：需要 http(s) 地址，例如 https://api.example.com/v1')
+      return
+    }
+    const balanceUrl = form.balanceUrl.trim() ? normalizeUrl(form.balanceUrl) : undefined
+    if (form.balanceUrl.trim() && !balanceUrl) {
+      flash('余额接口地址格式不对：需要 http(s) 地址')
+      return
+    }
     const rawSlug = form.slug.trim().toLowerCase()
     const slug = rawSlug
       ? rawSlug.replace(/[^a-z0-9-_]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
@@ -135,10 +160,13 @@ export default function ProviderManager({ providers, onProvidersChange, onBack }
         company: form.note.trim(),
         note: form.note.trim(),
         website: form.website.trim(),
-        baseUrl: form.baseUrl.trim().replace(/\/+$/, ''),
-        balanceUrl: form.balanceUrl.trim() || undefined,
+        baseUrl,
+        balanceUrl,
         protocol: form.protocol,
-        category: editingId ? form.category : 'custom',
+        // 自定义供应商的类别必须是 'custom'：以前编辑时允许改成「国内厂商」，保存后
+        // 它就从「自定义供应商」区消失、被当成内置供应商渲染成只读卡片，再也无法
+        // 编辑或删除（只能手改配置文件）。
+        category: 'custom' as const,
         models: form.models,
       }
 
