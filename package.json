@@ -1,6 +1,6 @@
 {
   "name": "llm-api-monitor",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "LLM API Real-time Monitor",
   "author": "yzx00123",
   "main": "./out/main/index.js",
@@ -9,7 +9,7 @@
     "build": "electron-vite build && node scripts/postbuild.mjs",
     "preview": "electron-vite preview",
     "compile": "electron-vite build && electron-vite preview",
-    "dist": "electron-vite build && electron-builder --win",
+    "dist": "npm run build && electron-builder --win",
     "release": "node scripts/release-github.mjs",
     "push:api": "node scripts/push-via-api.mjs",
     "check:agent": "node scripts/check-agent-export.mjs",

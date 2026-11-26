@@ -110,6 +110,11 @@ src/
 
 ## 更新日志
 
+### v1.5.4
+
+- 修复：**托盘图标变成一个空白方块、任务栏图标也丢了**。打包脚本 `npm run dist` 是直接跑 `electron-vite build` 再让 electron-builder 打包的，跳过了把 `icon.ico` / `icon.png` 复制进 `out/main` 的 postbuild 步骤；而 `electron-vite build` 会先清空 `out/` 目录 —— 结果打出来的 `app.asar` 里只有 `out/main/index.js`，没有图标文件，托盘 `new Tray(nativeImage.createEmpty())` 自然是块白板。现在 `npm run dist` 改成走 `npm run build`（含 postbuild），postbuild 自己也加了「目录不存在就创建、源图标缺失直接报错」，避免以后再悄悄漏掉。
+- 说明：这个 bug 只影响图标资源，监测、余额、账单、导出等功能不受影响。
+
 ### v1.5.3
 
 这一版新增「小米 MiMo 历史账单」：MiMo 的余额接口只给「开户至今累计」和「本自然月累计」两个数，接入本应用之前每天的消费是补不回来的；现在可以把控制台「消费账单」里的历史明细导进本地账本。
