@@ -37,6 +37,15 @@ export interface ElectronAPI {
    * keySuffix = 那把密钥的尾 6 位；不传则只要求登录一个账号。
    */
   mimoConnect: (keySuffix?: string) => Promise<MimoConnectResult>
+  /**
+   * 阿里云百炼免费额度（按模型统计，数据来自控制台内部接口）。
+   * force = true 时忽略 5 分钟缓存重新拉。
+   */
+  bailianGetQuota: (force?: boolean) => Promise<FreeQuotaResult>
+  /** 打开百炼控制台让用户登录，登录成功后返回额度。 */
+  bailianLogin: () => Promise<BailianLoginResult>
+  /** 退出百炼控制台登录（清 cookie）。 */
+  bailianLogout: () => Promise<{ ok: boolean }>
   /** Send custom text+model to one provider and measure latency.
    *  Omitted fields fall back to the saved 测延迟 settings. */
   latencyTest: (opts: {
@@ -140,6 +149,52 @@ export interface MimoConnectResult {
   keySuffixes?: string[] | null
   /** 点「连接控制台」的那把 key 是否属于这个账号；false = 登错号了。 */
   keyFound?: boolean
+  error?: string
+}
+
+/** 百炼免费额度里的一行（一个模型）。 */
+export interface FreeQuotaRow {
+  model: string
+  modelType: 'Text' | 'Vision' | 'Multimodal' | 'Audio' | 'Embedding'
+  /** 剩余 Token。 */
+  remaining: number
+  /** 发放总量（通常是 1,000,000）。 */
+  total: number
+  /** 剩余百分比 0~100。 */
+  remainPercentage?: number
+  /** 到期时间（毫秒时间戳）；缺省表示每月重置/长期有效。 */
+  expireAt?: number
+  /** 还有额度且没过期。 */
+  isValid: boolean
+  /** 「用完即停」是否开启。 */
+  stopOnExhaust: boolean
+}
+
+/** 免费额度汇总（对应控制台顶部四张卡）。 */
+export interface FreeQuotaSummary {
+  withQuota: number
+  over50: number
+  over80: number
+  exhaustedOrExpired: number
+  total: number
+  remainingTokens: number
+  totalTokens: number
+}
+
+export interface FreeQuotaResult {
+  ok: boolean
+  /** 是否已登录百炼控制台。 */
+  loggedIn: boolean
+  rows: FreeQuotaRow[]
+  summary: FreeQuotaSummary
+  fetchedAt: number
+  error?: string
+}
+
+export interface BailianLoginResult {
+  ok: boolean
+  rows?: FreeQuotaRow[]
+  summary?: FreeQuotaSummary
   error?: string
 }
 

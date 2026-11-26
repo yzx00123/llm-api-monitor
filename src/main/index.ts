@@ -16,6 +16,7 @@ import { homedir } from 'os'
 import { PROVIDERS, detectProvider } from './providers'
 import { monitorEngine, MonitorEngine, ProviderStatus, StatusAlert } from './monitor'
 import { openMimoLoginWindow } from './mimo'
+import { getFreeQuota, logoutBailian, openBailianLogin } from './bailianQuota'
 import {
   getApiKeys,
   setApiKeys,
@@ -691,6 +692,20 @@ ipcMain.handle('monitor:mimoConnect', async (_event, keySuffix?: string) => {
     await monitorEngine.refreshBalances('mimo')
   }
   return result
+})
+
+// ===== 阿里云百炼免费额度（只能在控制台里查，所以要走一次登录） =====
+
+ipcMain.handle('bailian:getQuota', async (_event, force?: boolean) => getFreeQuota(!!force))
+
+ipcMain.handle('bailian:login', async () => {
+  const result = await openBailianLogin(mainWindow)
+  return result
+})
+
+ipcMain.handle('bailian:logout', async () => {
+  await logoutBailian()
+  return { ok: true }
 })
 
 ipcMain.handle(

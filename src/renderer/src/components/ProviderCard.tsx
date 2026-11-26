@@ -1,6 +1,7 @@
 import { memo, useEffect, useState } from 'react'
 import type { Provider, ProviderStatus } from '../preload'
 import AgentExportModal from './AgentExportModal'
+import { useBailianQuota } from '../bailianQuota'
 
 interface Props {
   provider: Provider
@@ -18,6 +19,14 @@ function formatLatency(ms: number | null): string {
   if (ms === null) return '—'
   if (ms < 1000) return `${ms}ms`
   return `${(ms / 1000).toFixed(2)}s`
+}
+
+/** Token 数量简写：1234567 → 「123 万」。 */
+function formatTokens(value: number): string {
+  if (!Number.isFinite(value)) return '—'
+  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(2)} 亿`
+  if (value >= 10_000) return `${(value / 10_000).toFixed(value >= 1_000_000 ? 0 : 1)} 万`
+  return value.toLocaleString('zh-CN')
 }
 
 function latencyClass(ms: number | null | undefined): string {
@@ -94,6 +103,30 @@ function Sparkline({ data, cls }: { data: number[]; cls: string }) {
     <svg className={`spark spark-${cls || 'good'}`} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
       <polyline points={pts} />
     </svg>
+  )
+}
+
+/**
+ * 阿里云百炼的免费额度是「账号级、按模型发放」的，跟这一把 key 的余额无关，所以
+ * 只在卡片左下角挂一个汇总徽标（还剩几个模型有额度），明细放在账单页。
+ */
+function BailianFreeBadge() {
+  const { data } = useBailianQuota()
+  const summary = data?.summary
+  if (!data?.ok || !summary || summary.withQuota <= 0) return null
+  const top = data.rows
+    .filter((row) => row.isValid)
+    .sort((a, b) => b.remaining - a.remaining)
+    .slice(0, 5)
+  const title = [
+    `百炼免费额度：${summary.withQuota} 个模型还有额度（共 ${summary.total} 个）`,
+    ...top.map((row) => `${row.model}：${formatTokens(row.remaining)}`),
+    '明细见「账单」页',
+  ].join('\n')
+  return (
+    <span className="box-balance box-free" title={title}>
+      免费 {summary.withQuota} 个
+    </span>
   )
 }
 
@@ -261,6 +294,7 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
               登错账号？
             </span>
           )}
+          {provider.id === 'qwen' && <BailianFreeBadge />}
         </span>
         {broke ? (
           <span

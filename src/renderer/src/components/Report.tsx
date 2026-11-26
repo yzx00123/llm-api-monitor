@@ -6,6 +6,7 @@ import type {
   TokenReport,
   UsageReport
 } from '../preload'
+import { BailianQuotaPanel } from './BailianQuotaPanel'
 
 interface ReportProps {
   onBack: () => void
@@ -573,6 +574,8 @@ export default function Report({ onBack }: ReportProps): React.JSX.Element {
           </div>
         </>
       )}
+
+      <BailianQuotaPanel />
 
       <p className="report-note">
         统计口径：① 每天的花费 = 当天首次余额 − 当天最后一次余额，只统计软件运行期间；② 软件关掉的时段产生的费用，会并到下次打开软件那一天；③

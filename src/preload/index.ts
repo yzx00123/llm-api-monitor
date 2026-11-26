@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('monitor:importCustom', entries),
   detectKey: (key: string) => ipcRenderer.invoke('monitor:detectKey', key),
   mimoConnect: (keySuffix?: string) => ipcRenderer.invoke('monitor:mimoConnect', keySuffix),
+  bailianGetQuota: (force?: boolean) => ipcRenderer.invoke('bailian:getQuota', force),
+  bailianLogin: () => ipcRenderer.invoke('bailian:login'),
+  bailianLogout: () => ipcRenderer.invoke('bailian:logout'),
   latencyTest: (opts: {
     providerId: string
     key: string

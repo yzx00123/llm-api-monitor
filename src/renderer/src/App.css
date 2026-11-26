@@ -1000,6 +1000,13 @@ body {
   border-color: transparent;
   font-variant-numeric: tabular-nums;
 }
+/* 百炼免费额度汇总徽标（账号级，跟单把密钥的余额无关） */
+.box-balance.box-free {
+  color: var(--green);
+  background: var(--green-bg);
+  border-color: transparent;
+  font-variant-numeric: tabular-nums;
+}
 /* 延迟迷你曲线（每密钥最近 30 次探测） */
 .box-spark {
   height: 18px;
@@ -2069,4 +2076,103 @@ body {
 .report-note { color: var(--text-muted); font-size: 11.5px; line-height: 1.7; margin-top: 12px; }
 @media (max-width: 900px) {
   .report-stats { grid-template-columns: repeat(2, 1fr); }
+}
+/* ===== 阿里云百炼免费额度（账单页） ===== */
+.bailian-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.bailian-head-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.bailian-state {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.bailian-state.ok {
+  color: var(--green);
+}
+.bailian-state.muted {
+  color: var(--text-muted);
+}
+.bailian-message {
+  margin: 6px 0 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.bailian-message.err {
+  color: var(--red);
+}
+.bailian-unit {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.bailian-table {
+  margin-top: 12px;
+}
+.bailian-model {
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+.bailian-type {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.bailian-total {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.bailian-tier {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.bailian-bar {
+  display: inline-block;
+  width: 96px;
+  height: 6px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.bailian-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--green);
+  transition: width 0.3s ease;
+}
+.bailian-tier.warn .bailian-bar-fill {
+  background: var(--amber);
+}
+.bailian-tier.bad .bailian-bar-fill,
+.bailian-tier.exhausted .bailian-bar-fill {
+  background: var(--red);
+}
+.bailian-percent {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 32px;
+  text-align: right;
+}
+.bailian-tier.warn .bailian-percent {
+  color: var(--amber);
+}
+.bailian-tier.bad .bailian-percent,
+.bailian-tier.exhausted .bailian-percent {
+  color: var(--red);
 }
