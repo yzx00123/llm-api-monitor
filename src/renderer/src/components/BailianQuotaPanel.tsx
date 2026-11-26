@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { refreshBailianQuota, useBailianQuota } from '../bailianQuota'
 import type { FreeQuotaRow } from '../preload'
 
@@ -49,10 +49,28 @@ function toneClass(row: FreeQuotaRow): string {
   return 'bailian-tier good'
 }
 
-export function BailianQuotaPanel(): JSX.Element {
+export function BailianQuotaPanel(): JSX.Element | null {
   const { data, loading, error, refresh } = useBailianQuota()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  // 没导入百炼密钥的人不显示这一块 —— 免费额度是给「有百炼 key」的人看的，
+  // 对其它用户就是一段噪音。每次进账单页重新判断一次（新导入 key 后立刻出现）。
+  const [hasKey, setHasKey] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    void window.electronAPI
+      .getKeys()
+      .then((keys) => {
+        if (alive) setHasKey((keys?.qwen ?? []).length > 0)
+      })
+      .catch(() => {
+        if (alive) setHasKey(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   const login = async () => {
     setBusy(true)
@@ -92,6 +110,8 @@ export function BailianQuotaPanel(): JSX.Element {
     if (a.isValid !== b.isValid) return a.isValid ? -1 : 1
     return remainPercent(b) - remainPercent(a)
   })
+
+  if (hasKey !== true) return null
 
   return (
     <>
