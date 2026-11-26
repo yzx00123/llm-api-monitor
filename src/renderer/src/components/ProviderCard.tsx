@@ -27,6 +27,13 @@ function latencyClass(ms: number | null | undefined): string {
   return 'bad'
 }
 
+/** 中位数：单个 1~2s 的采样可能是上游抖动，取中位才代表「通常多快」。 */
+function median(nums: number[]): number {
+  const sorted = [...nums].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
 /** 限流退避的恢复时刻 → “15:03”（倒计时会随推送跳动，显示绝对时间更稳）。 */
 function formatClock(ts: number): string {
   return new Date(ts).toLocaleTimeString('zh-CN', {
@@ -231,7 +238,14 @@ function ProviderCard({ provider, keyMask, fullKey, label, keyIndex, status, onC
       )}
       <div className="box-meta">
         <span className="box-left">
-          <span className={`box-latency ${latencyClass(s?.latency)}`}>
+          <span
+            className={`box-latency ${latencyClass(s?.latency)}`}
+            title={
+              s?.latency == null
+                ? '首字延迟（TTFT）：从发出请求到收到第一个 token 的时间'
+                : `首字延迟（TTFT）：从发出请求到收到第一个 token 的时间${hist.length >= 2 ? `；最近 ${hist.length} 次中位 ${formatLatency(median(hist))}` : ''}`
+            }
+          >
             {formatLatency(s?.latency ?? null)}
           </span>
           {throttled && (

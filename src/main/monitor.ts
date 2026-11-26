@@ -141,6 +141,11 @@ export class MonitorEngine {
   private pendingRecheck = new Set<string>()
   /** 429 限流退避：statusKey → 最早可探测时间 / 连续被限流次数。 */
   private throttle: Map<string, { until: number; strikes: number }> = new Map()
+  /**
+   * 已经确认「不认 stream:true」的厂商（只在探测里用）。有些兼容网关收到
+   * stream 字段会直接 400，这里记住之后就走非流式，免得每轮都白打一次。
+   */
+  private streamUnsupported: Map<string, boolean> = new Map()
 
   registerProviders(list: Provider[]) {
     for (const p of list) this.registry.set(p.id, p)
@@ -541,7 +546,9 @@ export class MonitorEngine {
           await new Promise((r) => setTimeout(r, this.jitterMs()))
           const probeStart = Date.now()
           const result = await this.testKey(provider, key)
-          const latency = Date.now() - probeStart
+          // 流式探测报告了「首字时间」就用它：非流式要等整段生成完才回响应头，
+          // 那个数字会把「模型慢」算成「API 慢」，用户看到的 1~2 秒多来自这里。
+          const latency = result.firstTokenMs ?? Date.now() - probeStart
 
           const before = this.statuses.get(sk)
           const outOfMoney = MonitorEngine.isOutOfMoney(result)
@@ -760,11 +767,139 @@ export class MonitorEngine {
     return Math.floor(Math.random() * 400)
   }
 
+  /**
+   * 流式探测：返回「第一个数据块」的耗时，也就是用户真正感知的首字延迟。
+   *
+   * 为什么不用非流式：非流式请求时，很多网关要等整段回复都生成完才吐响应头
+   * （实测 Moonshot kimi-k3 同一把 key：非流式 1.85~2.0s，流式首块 0.99~1.28s），
+   * 于是卡片上显示的其实是「生成完整句话的时间」，看着像网络慢，其实是模型慢。
+   *
+   * 顺带把流里的事件收集起来解析 usage（探测自身 token 记账用）；读满 64KB 就
+   * 主动 cancel，别为了一条 1 token 的回复把整段流量拖完。
+   */
+  private async streamProbe(
+    url: string,
+    headers: Record<string, string>,
+    body: string,
+    signal: AbortSignal,
+    protocol: 'openai' | 'anthropic' | 'gemini' = 'openai'
+  ): Promise<{
+    ok: boolean
+    status: number
+    firstMs?: number
+    text: string
+    events: Record<string, any>[]
+    retryAfterMs?: number
+  }> {
+    const started = Date.now()
+    const resp = await fetch(url, { method: 'POST', headers, body, signal })
+    const retryAfterMs =
+      resp.status === 429 ? MonitorEngine.retryAfterFrom(resp) : undefined
+    if (!resp.ok) {
+      return { ok: false, status: resp.status, text: await resp.text(), events: [], retryAfterMs }
+    }
+    const contentType = resp.headers.get('content-type') ?? ''
+    const reader = resp.body?.getReader()
+    if (!reader || !contentType.includes('event-stream')) {
+      // 少数兼容网关对 stream:true 仍回整段 JSON —— 退回「一次性读完」。
+      const text = await resp.text()
+      return { ok: true, status: resp.status, firstMs: Date.now() - started, text, events: [] }
+    }
+
+    const decoder = new TextDecoder()
+    const events: Record<string, any>[] = []
+    let text = ''
+    let buffered = ''
+    let firstMs: number | undefined
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (firstMs === undefined) firstMs = Date.now() - started
+      const chunk = decoder.decode(value, { stream: true })
+      text += chunk
+      buffered += chunk
+      let idx: number
+      while ((idx = buffered.indexOf('\n')) >= 0) {
+        const line = buffered.slice(0, idx).trim()
+        buffered = buffered.slice(idx + 1)
+        if (!line.startsWith('data:')) continue
+        const payload = line.slice(5).trim()
+        if (!payload || payload === '[DONE]') continue
+        try {
+          events.push(JSON.parse(payload) as Record<string, any>)
+        } catch {
+          // 半截 JSON / 厂商自定义事件，忽略
+        }
+      }
+      // 1 token 的回复没必要把整段流拖完；拿到结束标志或读满 64KB 就收工。
+      if (MonitorEngine.isStreamDone(events[events.length - 1] ?? {}, protocol) || text.length > 65536) {
+        await reader.cancel().catch(() => {})
+        break
+      }
+    }
+    return { ok: true, status: resp.status, firstMs, text, events }
+  }
+
+  /**
+   * 流式探测的 token 记账。网关不给 usage（流式常见）时按探测本身估算：
+   * 输入是 'hi'（约 1 token），输出上限 1 token —— 误差 ±1 token，无所谓。
+   */
+  private reportProbeUsageStream(
+    providerId: string,
+    events: Record<string, any>[],
+    protocol: 'openai' | 'anthropic' | 'gemini',
+    probeTokens: number
+  ): void {
+    if (!this.onProbeUsage) return
+    let prompt = 0
+    let completion = 0
+    for (const evt of events) {
+      const usage = MonitorEngine.extractStreamUsage(evt, protocol)
+      if (!usage) continue
+      prompt = Number(usage.prompt_tokens ?? prompt) || prompt
+      completion = Number(usage.completion_tokens ?? completion) || completion
+    }
+    if (!prompt && !completion) {
+      prompt = 1
+      completion = Math.max(probeTokens, 1)
+    }
+    const total = prompt + completion
+    if (!Number.isFinite(total) || total <= 0) return
+    this.onProbeUsage({ providerId, prompt, completion, total })
+  }
+
+  /** 探测失败的统一返回（401/403 记认证失败，其余算「服务可用但这次没成功」）。 */
+  private probeFailure(
+    status: number | undefined,
+    text: string,
+    retryAfterMs?: number
+  ): {
+    success: boolean
+    authValid: boolean
+    error: string
+    status?: number
+    retryAfterMs?: number
+    outOfBalance?: boolean
+  } {
+    if (status === 401 || status === 403) {
+      return { success: false, authValid: false, error: `Auth failed (${status})`, status }
+    }
+    return {
+      success: false,
+      authValid: true,
+      error: `HTTP ${status}: ${text.slice(0, status === 429 ? 200 : 100)}`,
+      status,
+      retryAfterMs: status === 429 ? retryAfterMs : undefined,
+      // 有些厂商把「没钱」也回成 429（正文往往写在后半段），判断要看完整正文。
+      outOfBalance: MonitorEngine.looksLikeOutOfBalance(text),
+    }
+  }
+
   private async testKey(
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean; firstTokenMs?: number }> {
     try {
       if (provider.protocol === 'anthropic') {
         return await this.testAnthropic(provider, key, opts)
@@ -783,7 +918,7 @@ export class MonitorEngine {
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean; firstTokenMs?: number }> {
     const url = `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 10000)
@@ -803,6 +938,49 @@ export class MonitorEngine {
     const probeModel = probe.probeModel?.trim() || provider.models[0] || 'gpt-4o-mini'
 
     try {
+      // 先用流式请求量「首字延迟」——这才是用户感知的 API 延迟；非流式要等整段
+      // 生成完才回响应头，测出来的其实是模型吐完一整句话的时间。
+      if (this.streamUnsupported.get(provider.id) !== true) {
+        const streamed = await this.streamProbe(
+          url,
+          { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          JSON.stringify({
+            model: probeModel,
+            messages: [{ role: 'user', content: probeText }],
+            max_tokens: probeTokens,
+            stream: true,
+          }),
+          controller.signal
+        )
+        if (streamed.ok) {
+          if (this.looksLikeHiddenAuthError(streamed.text)) {
+            return {
+              success: false,
+              authValid: false,
+              error: `Hidden auth error in 200 body: ${streamed.text.slice(0, 100)}`,
+              status: streamed.status,
+            }
+          }
+          this.reportProbeUsageStream(provider.id, streamed.events, 'openai', probeTokens)
+          return {
+            success: true,
+            authValid: true,
+            status: streamed.status,
+            firstTokenMs: streamed.firstMs,
+          }
+        }
+        if (streamed.status === 400 || streamed.status === 415 || streamed.status === 422) {
+          // 只有「正文提到 stream」才认为是网关不支持流式；其它 400 是真参数错误。
+          if (!/stream/i.test(streamed.text)) {
+            return this.probeFailure(streamed.status, streamed.text, streamed.retryAfterMs)
+          }
+          this.streamUnsupported.set(provider.id, true)
+        } else {
+          return this.probeFailure(streamed.status, streamed.text, streamed.retryAfterMs)
+        }
+      }
+
+      // —— 非流式兜底（网关不认 stream，或上面刚被判为不支持） ——
       const resp = await fetch(url, {
         method: 'POST',
         headers: {
@@ -897,7 +1075,7 @@ export class MonitorEngine {
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean; firstTokenMs?: number }> {
     const url = `${provider.baseUrl}/v1/messages`
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 10000)
@@ -916,6 +1094,47 @@ export class MonitorEngine {
     const probeModel = probe.probeModel?.trim() || provider.models[0] || 'claude-haiku-4-5'
 
     try {
+      // 流式优先：拿「首字延迟」（见 testOpenAICompatible 里的说明）。
+      if (this.streamUnsupported.get(provider.id) !== true) {
+        const streamed = await this.streamProbe(
+          url,
+          {
+            'Content-Type': 'application/json',
+            'x-api-key': key,
+            'anthropic-version': '2023-06-01',
+          },
+          JSON.stringify({
+            model: probeModel,
+            max_tokens: probeTokens,
+            messages: [{ role: 'user', content: probeText }],
+            stream: true,
+          }),
+          controller.signal
+        )
+        if (streamed.ok) {
+          if (this.looksLikeHiddenAuthError(streamed.text)) {
+            return {
+              success: false,
+              authValid: false,
+              error: `Hidden auth error in 200 body: ${streamed.text.slice(0, 100)}`,
+              status: streamed.status,
+            }
+          }
+          this.reportProbeUsageStream(provider.id, streamed.events, 'anthropic', probeTokens)
+          return {
+            success: true,
+            authValid: true,
+            status: streamed.status,
+            firstTokenMs: streamed.firstMs,
+          }
+        }
+        if (streamed.status === 400 && /stream/i.test(streamed.text)) {
+          this.streamUnsupported.set(provider.id, true)
+        } else {
+          return this.probeFailure(streamed.status, streamed.text, streamed.retryAfterMs)
+        }
+      }
+
       const resp = await fetch(url, {
         method: 'POST',
         headers: {
@@ -972,7 +1191,7 @@ export class MonitorEngine {
     provider: Provider,
     key: string,
     opts?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean }> {
+  ): Promise<{ success: boolean; authValid: boolean; error?: string; status?: number; retryAfterMs?: number; outOfBalance?: boolean; firstTokenMs?: number }> {
     const probe = getSettings()
     // 探测只为「能通」：1 token 输入 + 1 token 输出就够。以前每轮要 ~28 token
     // （十几字的提示 + 16 token 输出），10 秒一轮 × 十几把 key 一天就是上百万
@@ -990,6 +1209,48 @@ export class MonitorEngine {
     }
 
     try {
+      // 流式优先：`:streamGenerateContent?alt=sse` 才测得到「首字延迟」，
+      // `:generateContent` 要等整段生成完（见 testOpenAICompatible 里的说明）。
+      if (this.streamUnsupported.get(provider.id) !== true && model) {
+        const streamUrl = `${provider.baseUrl}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`
+        const streamed = await this.streamProbe(
+          streamUrl,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({
+            contents: [{ parts: [{ text: probeText }] }],
+            generationConfig: { maxOutputTokens: probeTokens },
+          }),
+          controller.signal,
+          'gemini'
+        )
+        if (streamed.ok) {
+          if (this.looksLikeHiddenAuthError(streamed.text)) {
+            return {
+              success: false,
+              authValid: false,
+              error: `Hidden auth error in 200 body: ${streamed.text.slice(0, 100)}`,
+              status: streamed.status,
+            }
+          }
+          this.reportProbeUsageStream(provider.id, streamed.events, 'gemini', probeTokens)
+          return {
+            success: true,
+            authValid: true,
+            status: streamed.status,
+            firstTokenMs: streamed.firstMs,
+          }
+        }
+        if (streamed.status === 400 || streamed.status === 403) {
+          return {
+            success: false,
+            authValid: false,
+            error: `Auth/API failed (${streamed.status})`,
+            status: streamed.status,
+          }
+        }
+        return this.probeFailure(streamed.status, streamed.text, streamed.retryAfterMs)
+      }
+
       const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
