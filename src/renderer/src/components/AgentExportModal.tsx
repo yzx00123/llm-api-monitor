@@ -97,6 +97,8 @@ export default function AgentExportModal({ provider, apiKey, label, onClose }: P
       apiKey,
       model: model.trim() || undefined,
       providerName: title,
+      providerId: provider.id,
+      providerProtocol: provider.protocol,
     }
     if (selected === 'custom') {
       const path = customPath.trim()
@@ -104,7 +106,7 @@ export default function AgentExportModal({ provider, apiKey, label, onClose }: P
       options.path = path
     }
     return options
-  }, [selected, provider.baseUrl, apiKey, model, title, customPath])
+  }, [selected, provider.baseUrl, provider.id, provider.protocol, apiKey, model, title, customPath])
 
   // 预演：改动后 350ms 才请求，切目标 / 打模型名时不会连打主进程。
   useEffect(() => {
@@ -196,6 +198,11 @@ export default function AgentExportModal({ provider, apiKey, label, onClose }: P
       <span className="agent-target-top">
         <span className="agent-target-name">{t.label}</span>
         {t.installed && <span className="agent-target-tag ok">已安装</span>}
+        {t.confidence === 'guessed' && (
+          <span className="agent-target-tag warn" title="这个路径/字段是按厂商习惯推测的，产品是否读取未经验证">
+            未验证
+          </span>
+        )}
       </span>
       <span className="agent-target-hint">{t.evidence ?? t.writes}</span>
     </button>

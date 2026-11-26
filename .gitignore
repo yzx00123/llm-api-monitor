@@ -10,6 +10,8 @@ release/
 # Logs
 *.log
 npm-debug.log*
+# 通道体检脚本编译出的临时模块（正常跑完会自己删）
+.agent-check-bundle.mjs
 
 # Runtime data
 # 注意：密钥配置文件存在 %APPDATA%，不在本目录，但以防万一

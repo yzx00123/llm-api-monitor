@@ -1810,6 +1810,11 @@ body {
   background: var(--green-bg);
   border-color: transparent;
 }
+.agent-target-tag.warn {
+  color: var(--amber);
+  background: var(--amber-bg);
+  border-color: transparent;
+}
 .agent-target-tag.off { color: var(--text-muted); }
 .agent-target-hint {
   font-size: 11px;

@@ -19,7 +19,7 @@
 - **系统托盘 + 后台驻留**：关窗不退出，监测继续，托盘一键唤出（可关）
 - **状态快照导出**：一键导出所有密钥状态为 CSV（带 BOM，Excel 直接打开不乱码）
 - **消费账单**：按天统计每家厂商花了多少钱，折线图 / 柱状图 / 树状图切换，可导出 CSV；token 用量全厂商通用（统计本软件探测自身消耗）
-- **导出到 Agent**：一键把密钥写进 19 个 AI 编码 Agent 的配置（Claude Code / Codex / Gemini CLI / Cursor / OpenClaw / DeepSeek Harness …）；写入前显示将要写入的完整文件内容，写入后回读校验，只改自己那一条、保留别人的配置与注释
+- **导出到 Agent**：一键把密钥写进 19 个 AI 编码 Agent 的配置（Claude Code / Codex / Gemini CLI / Cursor / OpenClaw / DeepSeek Harness …）；写入前显示将要写入的完整文件内容，写入后回读校验，只改自己那一条、保留别人的配置与注释。每个通道标注可信度（已验证 / 有官方文档 / 未验证），协议不匹配时直接拒绝而不是写一份用不了的配置
 - **应用内使用说明**：设置 → 使用说明，含快速上手三步、界面说明与常见问题
 - **低资源占用**：禁用 GPU 加速 + V8 堆上限 + 隐藏时主动 GC，前台 ~156 MB / 后台 ~148 MB
 
@@ -64,6 +64,9 @@ npm run ship     # = build + dist + release
 - `npm run release` 把安装包上传到 GitHub Releases（正文取自本文件对应版本的更新日志）
 - 只补传某个历史版本的包：`npm run release -- 1.3.7`（要求 `release/` 里已有该版本的 exe）
 - 凭据复用 git push 的凭据（Windows 凭据管理器），也可以临时用 `GITHUB_TOKEN` 环境变量覆盖
+- 改过「导出到 Agent」的通道定义后，跑 `npm run check:agent` 自检：它会在临时 HOME 里伪造
+  19 个 Agent 全部已安装 + 都已有用户配置，逐个预演 / 写入 / 回读校验，再跑一遍协议矩阵
+  （Claude Code、Codex、Gemini CLI × 各协议密钥），全过才退出码 0
 - 代码推送：平时 `git push`；如果连不上 `github.com:443`（`Recv failure: Connection was reset` /
   `Failed to connect to github.com:443`）而 `api.github.com` 仍然通，可以用
   `npm run push:api` 走 GitHub API 推送当前 HEAD——它会复刻本地提交的全部字段，
@@ -102,6 +105,17 @@ src/
 - Azure OpenAI / AWS Bedrock 的签名认证暂未支持
 
 ## 更新日志
+
+### v1.4.6
+
+这一版是「导出到 Agent」的通道体检：把 19 个目标逐个体面地验一遍，顺手修掉三个真的写错了的格式。
+
+- 修复：**Codex 的配置格式一直是错的**。旧版写 `[providers.llm-monitor]` + `api_key`，而 Codex CLI 读的是 `[model_providers.<id>]`，还要 `wire_api`、`base_url` 和鉴权头——以前那份配置等于没配上。现在按正确 schema 写，并主动清掉旧格式遗留，只在文件里没有 `model_provider` 默认指向时才补一行。
+- 修复：**Claude Code 的端点一直是错的**。旧版把 OpenAI 兼容地址（如 `https://api.deepseek.com/v1`）直接塞进 `ANTHROPIC_BASE_URL`，Claude Code 会在这个地址后面再拼 `/v1/messages`，必然 404。现在自动换到厂商的 Anthropic 兼容端点（DeepSeek / Moonshot / 小米 MiMo 的 `/anthropic`、智谱、MiniMax，均已用真 key 打 `/v1/messages` 验证存在），并补上 `ANTHROPIC_SMALL_FAST_MODEL`——不给它，后台任务会去找 haiku，第三方端点没有这个模型。
+- 修复：**Gemini CLI 不再假装能接 OpenAI 密钥**。Gemini CLI 只认 `generateContent` 协议，以前无论选哪家都往 `GEMINI_API_KEY` 里塞，等于写了个用不了的配置。现在协议不匹配直接拒绝并说明原因。
+- 新增：**每个通道标注可信度**。已验证（本机真实配置里见过同类结构）＝ 小米 MiMo Desktop、DeepSeek Harness、OpenClaw；有官方文档 ＝ Claude Code、Codex、Gemini CLI、OpenCode、Cursor；其余 10 个（Kimi CLI、MiniMax Code、腾讯 CodeBuddy / WorkBuddy、百度 Comate、字节 Trae / 豆包 / MarsCode、阿里 Qoder、通义灵码、扣子 Coze）是**按厂商习惯推测的路径，未经验证**，界面上用琥珀色「未验证」徽标标出来。
+- 新增：**`npm run check:agent` 通道体检脚本**。在临时 HOME 里伪造「19 个 Agent 全都装了」且「每个都已有一份用户配置」，逐个预演 → 写入 → 回读校验（我们的条目在、用户的配置与注释还在、`.bak` 备份已生成），再跑 6 种密钥 × 3 个专用 Agent 的协议矩阵。本次结果：20/20 目标写入与保留校验通过。
+- 新增：**mimocode 的模型字段补全**（`limit.context` / `limit.output` / `modalities`），照本机真实配置补齐，否则 MiMo 会把上下文窗口当成 0。
 
 ### v1.4.5
 

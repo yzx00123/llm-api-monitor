@@ -55,6 +55,15 @@ export interface AgentTargetSpec {
   dirs?: string[]
   /** 该 Agent 的特殊说明 */
   note?: string
+  /** 这个 Agent 只认哪种协议的端点；不填按 openai 处理 */
+  protocol?: 'openai' | 'anthropic' | 'gemini' | 'any'
+  /**
+   * 这条通道的可信度（不填按 guessed 处理）：
+   * - verified：在本机真实配置里见过同样结构（MiMo Desktop / DSH / OpenClaw）
+   * - documented：官方文档给的配置位置与字段（Claude Code / Codex / Gemini / OpenCode）
+   * - guessed：按厂商习惯推测的路径与字段，产品是否读它未经验证
+   */
+  confidence?: 'verified' | 'documented' | 'guessed'
 }
 
 export const AGENT_TARGETS: AgentTargetSpec[] = [
@@ -64,7 +73,8 @@ export const AGENT_TARGETS: AgentTargetSpec[] = [
     group: '国际',
     path: '~/.claude/settings.json',
     format: 'json',
-    writes: 'settings.json 的 env.ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL',
+    writes: 'settings.json 的 env.ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL（需要 Anthropic 兼容端点）',
+    protocol: 'anthropic',
     bins: ['claude'],
     dirs: ['~/.claude/projects', '~/.local/bin/claude.exe', 'AppData/Roaming/npm/node_modules/@anthropic-ai'],
   },
@@ -84,7 +94,8 @@ export const AGENT_TARGETS: AgentTargetSpec[] = [
     group: '国际',
     path: '~/.gemini/settings.json',
     format: 'json',
-    writes: 'settings.json 的 env.GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL',
+    writes: 'settings.json 的 env.GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL（需要 Gemini 协议端点）',
+    protocol: 'gemini',
     bins: ['gemini'],
     dirs: ['~/.gemini/tmp', 'AppData/Roaming/npm/node_modules/@google/gemini-cli'],
   },
@@ -104,6 +115,7 @@ export const AGENT_TARGETS: AgentTargetSpec[] = [
     group: '国际',
     path: '~/.cursor/mcp.json',
     format: 'manual',
+    protocol: 'any',
     writes: 'Cursor 没有「自定义 Base URL」的配置文件，只能在设置界面手动填',
     bins: ['cursor'],
     dirs: ['AppData/Local/Programs/cursor', 'AppData/Local/cursor-updater', 'AppData/Roaming/Cursor'],
@@ -251,6 +263,50 @@ const PROVIDER_KEY = 'llm-monitor'
 /** DSH 从环境变量读密钥，这个名字对应 .credentials.yaml 里的 refs 键。 */
 const DSH_ENV = 'LLM_MONITOR_API_KEY'
 
+/**
+ * 各通道可信度。写文件这件事本身都能验证（回读解析），但「那个产品到底读不读
+ * 这个路径 / 这套字段」只有官方文档或本机真实配置能证明，剩下的就是推测 ——
+ * 界面上必须如实标出来，不然用户会以为 19 个都能用。
+ */
+const CONFIDENCE: Record<string, 'verified' | 'documented' | 'guessed'> = {
+  // 本机真实配置里见过同类结构
+  mimoDesktop: 'verified',
+  deepseekHarness: 'verified',
+  openclaw: 'verified',
+  // 官方文档明确写了配置文件与字段
+  claudeCode: 'documented',
+  codex: 'documented',
+  gemini: 'documented',
+  openCode: 'documented',
+  cursorUser: 'documented',
+  // 按厂商习惯推测的位置，产品读不读未经验证
+  kimiCode: 'guessed',
+  minimaxCode: 'guessed',
+  codebuddy: 'guessed',
+  workbuddy: 'guessed',
+  baiduComate: 'guessed',
+  byteTrae: 'guessed',
+  aliQoder: 'guessed',
+  aliLingma: 'guessed',
+  doubao: 'guessed',
+  marscode: 'guessed',
+  coze: 'guessed',
+}
+
+/**
+ * 各家的 Anthropic 兼容端点（Claude Code / Kimi CLI 这类只吃 Anthropic 协议的
+ * Agent 必须用它）。这些端点都实测过：用真 key 打 /v1/messages 会回 Anthropic
+ * 格式的 402/429（= 端点存在、协议对），而不是 404。
+ */
+const ANTHROPIC_COMPAT: Record<string, string> = {
+  deepseek: 'https://api.deepseek.com/anthropic',
+  moonshot: 'https://api.moonshot.cn/anthropic',
+  kimi: 'https://api.moonshot.cn/anthropic',
+  mimo: 'https://api.xiaomimimo.com/anthropic',
+  zhipu: 'https://open.bigmodel.cn/api/anthropic',
+  minimax: 'https://api.minimaxi.com/anthropic',
+}
+
 // ─────────────────────────── 路径 / 检测 ───────────────────────────
 
 function expand(pathTemplate: string): string {
@@ -296,6 +352,8 @@ export interface AgentTargetInfo {
   evidence: string | null
   writes: string
   note?: string
+  /** 这条通道的可信度，界面上要如实标出来（推测的路径可能根本没人读） */
+  confidence: 'verified' | 'documented' | 'guessed'
 }
 
 /** 检测所有目标：安装证据 + 配置文件存在与否，两个维度分开报。 */
@@ -346,6 +404,7 @@ export function detectAgentTargets(): AgentTargetInfo[] {
       evidence,
       writes: spec.writes,
       note: spec.note,
+      confidence: spec.confidence ?? CONFIDENCE[spec.id] ?? 'guessed',
     }
   })
 }
@@ -359,6 +418,47 @@ export interface AgentExportOptions {
   apiKey: string
   model?: string
   providerName?: string
+  /** 供应商 id（用于查它的 Anthropic 兼容端点） */
+  providerId?: string
+  /** 这把密钥原生协议，决定哪些 Agent 能用它 */
+  providerProtocol?: 'openai' | 'anthropic' | 'gemini'
+}
+
+/** 去掉末尾斜杠与 /v1：Claude Code 自己会拼 /v1/messages。 */
+function stripV1(url: string): string {
+  return url.replace(/\/+$/, '').replace(/\/v1$/i, '')
+}
+
+/**
+ * 按目标 Agent 需要的协议给出真正可用的 Base URL。
+ * 返回 error 表示「这把密钥根本喂不进这个 Agent」，界面上要直接说清楚，
+ * 而不是照样写一份坏配置进去。
+ */
+function baseForProtocol(
+  opts: AgentExportOptions,
+  need: 'openai' | 'anthropic' | 'gemini' | 'any'
+): { base?: string; error?: string } {
+  const proto = opts.providerProtocol ?? 'openai'
+  if (need === 'any' || need === proto) {
+    return { base: need === 'anthropic' ? stripV1(opts.baseUrl) : opts.baseUrl }
+  }
+  if (need === 'anthropic') {
+    const mapped = opts.providerId ? ANTHROPIC_COMPAT[opts.providerId] : undefined
+    if (mapped) return { base: mapped }
+    return {
+      error:
+        '这家厂商没有提供 Anthropic 兼容端点，Claude Code / Kimi CLI 这类只认 Anthropic 协议的 Agent 用不了它。' +
+        '目前确认可用的有：DeepSeek（…/anthropic）、Moonshot（…/anthropic）、小米 MiMo（…/anthropic）、智谱、MiniMax。',
+    }
+  }
+  if (need === 'gemini') {
+    return {
+      error:
+        'Gemini CLI 只吃 Gemini 协议（generateContent）的端点，OpenAI 兼容的密钥喂不进去。' +
+        '要用 Gemini CLI，请选 Gemini 官方或其他 Gemini 兼容网关的密钥。',
+    }
+  }
+  return { error: `这个 Agent 需要 ${need} 协议端点，而这把密钥是 ${proto} 协议。` }
 }
 
 export interface AgentFilePlan {
@@ -447,6 +547,22 @@ function modelsMap(model?: string): Record<string, any> {
   const m = model?.trim()
   if (!m) return {}
   return { [m]: { name: m } }
+}
+
+/**
+ * MiMo Desktop（mimocode）的 models 结构：本机真实配置里每个模型都带 limit 与
+ * modalities，缺了这两个字段它会把上下文长度当成 0，容易报错，所以照着补齐。
+ */
+function mimocodeModels(model?: string): Record<string, any> {
+  const m = model?.trim()
+  if (!m) return {}
+  return {
+    [m]: {
+      name: m,
+      limit: { context: 128000, output: 8192 },
+      modalities: { input: ['text'], output: ['text'] },
+    },
+  }
 }
 
 function jsonContent(data: Record<string, any>): string {
@@ -612,38 +728,76 @@ function envSnippet(opts: AgentExportOptions): string {
     .join('\n')
 }
 
-/** Codex TOML：只替换 # --- 标记 --- 到下一个表头之间的那一段。 */
+/** TOML 字符串转义（密钥里不会有引号，但 URL 可能带反斜杠）。 */
+function tomlStr(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+/**
+ * Codex CLI：配置写在 `[model_providers.<id>]`（不是 `[providers.<id>]`），
+ * 需要 name / base_url / wire_api，鉴权靠 env_key 或静态 http_headers。
+ * 这里用 http_headers 直接带上 Authorization，省得用户再去设环境变量。
+ * `model_provider = "llm-monitor"` 只在文件里没有这一项时补一行，不覆盖用户已有选择。
+ */
 function planCodexToml(path: string, opts: AgentExportOptions): string {
-  let text = existsSync(path) ? readFileSync(path, 'utf-8') : ''
-  const HEAD = '[providers.llm-monitor]'
+  let lines = (existsSync(path) ? readFileSync(path, 'utf-8') : '').split(/\r?\n/)
+  const HEAD = '[model_providers.llm-monitor]'
   const START = '# --- LLM API Monitor 导出 ---'
-  const lines = text.split(/\r?\n/)
-  const startIdx = lines.findIndex((l) => l.trim() === START)
-  if (startIdx >= 0) {
-    let endIdx = lines.length
-    for (let i = startIdx + 1; i < lines.length; i++) {
+
+  // 1) 清掉 v1.4.5 及更早写的旧格式（Codex 根本不读 [providers.*]）。
+  const legacyTable = /^\[providers\.llm-monitor\]\s*$/
+  const legacyIdx = lines.findIndex((l) => legacyTable.test(l.trim()))
+  if (legacyIdx >= 0) {
+    let end = lines.length
+    for (let i = legacyIdx + 1; i < lines.length; i++) {
       const t = lines[i].trim()
-      if (t.startsWith('[') && t !== HEAD) {
-        endIdx = i
+      if (t.startsWith('[') && !legacyTable.test(t)) {
+        end = i
         break
       }
     }
-    lines.splice(startIdx, endIdx - startIdx)
-    text = lines.join('\n')
+    lines.splice(legacyIdx, end - legacyIdx)
   }
+
+  // 2) 清掉本工具上次写的整段（从标记到下一个「别人的」表头）。
+  const startIdx = lines.findIndex((l) => l.trim() === START)
+  if (startIdx >= 0) {
+    let end = lines.length
+    for (let i = startIdx + 1; i < lines.length; i++) {
+      const t = lines[i].trim()
+      if (t.startsWith('[') && !t.startsWith('[model_providers.llm-monitor')) {
+        end = i
+        break
+      }
+    }
+    lines.splice(startIdx, end - startIdx)
+  }
+
+  // 3) 没有 model_provider 时补一行默认项（TOML 顶层键必须出现在任何表头之前）。
+  const hasModelProvider = lines.some((l) => /^\s*model_provider\s*=/.test(l))
+  if (!hasModelProvider) {
+    const firstTable = lines.findIndex((l) => l.trim().startsWith('['))
+    const insertAt = firstTable < 0 ? lines.length : firstTable
+    lines.splice(insertAt, 0, '# Codex CLI 用下面这个 provider（LLM API Monitor 导出时补的一行）', 'model_provider = "llm-monitor"', '')
+  }
+
   const model = opts.model?.trim() || ''
-  const block = [
+  const blockLines = [
     START,
     HEAD,
-    `base_url = "${opts.baseUrl}"`,
-    `api_key = "${opts.apiKey}"`,
-    model ? `model = "${model}"` : '',
+    `name = ${tomlStr(opts.providerName ?? 'LLM API Monitor')}`,
+    `base_url = ${tomlStr(opts.baseUrl)}`,
+    'wire_api = "chat"',
     '',
+    '[model_providers.llm-monitor.http_headers]',
+    `Authorization = ${tomlStr(`Bearer ${opts.apiKey}`)}`,
   ]
-    .filter(Boolean)
-    .join('\n')
-  const head = text.trimEnd()
-  return (head ? `${head}\n\n` : '') + block + '\n'
+  if (model) blockLines.push(`# 模型 ${model}：在 Codex 里用 -m ${model} 指定，或加一行 model = "${model}"`)
+  blockLines.push('')
+  const block = blockLines.join('\n')
+
+  const head = lines.join('\n').trimEnd()
+  return `${head ? `${head}\n\n` : ''}${block}\n`
 }
 
 /** DSH：cordis.patch.yml 的 llm-pi-ai.providers + .credentials.yaml 的 refs。 */
@@ -730,6 +884,15 @@ export function planAgentExport(opts: AgentExportOptions): AgentPlan {
     return { ok: false, target: opts.target, path, files: [], manual: false, error: '缺少目标路径' }
   }
 
+  // 先确认「这把密钥能不能喂进这个 Agent」——协议对不上就直接说明原因，
+  // 别写一份看起来成功、实际用不了的配置。
+  const need = spec?.protocol ?? 'openai'
+  const resolved = baseForProtocol(opts, need)
+  if (!resolved.base) {
+    return { ok: false, target: opts.target, path, files: [], manual: false, error: resolved.error }
+  }
+  opts = { ...opts, baseUrl: resolved.base }
+
   if (opts.target === 'deepseekHarness') return planDsh(opts)
 
   if (spec?.format === 'manual') {
@@ -762,7 +925,7 @@ export function planAgentExport(opts: AgentExportOptions): AgentPlan {
         npm: '@ai-sdk/openai-compatible',
         only_configured_models: true,
         options: { apiKey: opts.apiKey, baseURL: opts.baseUrl },
-        models: modelsMap(opts.model),
+        models: mimocodeModels(opts.model),
       }
       const raw = existsSync(path) ? readFileSync(path, 'utf-8') : ''
       const surgical = raw ? upsertJsoncProviderEntry(raw, PROVIDER_KEY, JSON.stringify(entry)) : null
@@ -810,10 +973,20 @@ export function planAgentExport(opts: AgentExportOptions): AgentPlan {
     const data = readJsonFile(path)
     switch (opts.target) {
       case 'claudeCode':
+        // Claude Code 读 settings.json 的 env：密钥走 AUTH_TOKEN / API_KEY，端点走
+        // ANTHROPIC_BASE_URL（它自己拼 /v1/messages，所以这里不能带 /v1）。
+        // SMALL_FAST_MODEL 必须一起给，否则它默认去找 haiku，第三方端点没有这个模型。
         data.env = {
           ...(data.env ?? {}),
           ANTHROPIC_API_KEY: opts.apiKey,
+          ANTHROPIC_AUTH_TOKEN: opts.apiKey,
           ANTHROPIC_BASE_URL: opts.baseUrl,
+          ...(opts.model?.trim()
+            ? {
+                ANTHROPIC_MODEL: opts.model.trim(),
+                ANTHROPIC_SMALL_FAST_MODEL: opts.model.trim(),
+              }
+            : {}),
         }
         if (opts.model?.trim()) data.model = opts.model.trim()
         break
@@ -922,8 +1095,8 @@ export function verifyAgentConfig(plan: AgentPlan): { ok: boolean; error?: strin
         const errs = doc.errors
         if (errs.length > 0) return { ok: false, error: `YAML 校验失败：${errs[0].message}` }
       } else if (file.language === 'toml') {
-        if (!text.includes('[providers.llm-monitor]')) {
-          return { ok: false, error: 'TOML 写入后没找到 [providers.llm-monitor]' }
+        if (!text.includes('[model_providers.llm-monitor]')) {
+          return { ok: false, error: 'TOML 写入后没找到 [model_providers.llm-monitor]' }
         }
       }
     } catch (err) {

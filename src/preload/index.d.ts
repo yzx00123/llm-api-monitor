@@ -251,15 +251,20 @@ export interface AgentTargetInfo {
   /** 写进文件里哪一块 */
   writes: string
   note?: string
+  /** 通道可信度：verified=本机真实配置验证过，documented=官方文档，guessed=推测路径 */
+  confidence: 'verified' | 'documented' | 'guessed'
 }
 
 export interface AgentExportOptions {
-  target: AgentTargetId
+  target: AgentTargetId | 'custom'
   path?: string
   baseUrl: string
   apiKey: string
   model?: string
   providerName?: string
+  /** 供应商 id / 原生协议：用来判断这把密钥能不能喂进只认某种协议的 Agent */
+  providerId?: string
+  providerProtocol?: 'openai' | 'anthropic' | 'gemini'
 }
 
 export interface AgentFilePlan {
