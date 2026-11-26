@@ -672,12 +672,126 @@ ipcMain.handle('monitor:checkNow', (_event, providerId: string, keyIndex?: numbe
   return true
 })
 
-ipcMain.handle('monitor:importCustom', (_event, customEntries: Array<{ baseUrl: string; key: string }>) => {
-  return customEntries.map((entry) => {
-    const matched = PROVIDERS.find((p) => entry.baseUrl.includes(p.baseUrl.replace('https://', '')))
-    return { ...entry, providerId: matched?.id ?? 'custom' }
+/**
+ * 把用户填的 baseUrl 规范成可比较的形式（去尾斜杠 + 小写）。
+ * 导入清单里经常一个写 `https://api.deepseek.com`、另一个写 `https://api.deepseek.com/v1/`。
+ */
+function normalizeBaseUrl(raw: string): string {
+  return (raw || '').trim().replace(/\/+$/, '').toLowerCase()
+}
+
+/** 按 baseUrl 找供应商：完全相等 / 互为前缀（补没补 /v1 都能认）。 */
+function matchProviderByBaseUrl(baseUrl: string) {
+  const norm = normalizeBaseUrl(baseUrl)
+  if (!norm) return undefined
+  return [...PROVIDERS, ...getCustomProviders()].find((p) => {
+    const pb = normalizeBaseUrl(p.baseUrl)
+    if (!pb) return false
+    return norm === pb || norm.startsWith(`${pb}/`) || pb.startsWith(`${norm}/`)
   })
-})
+}
+
+/** 用域名生成一个稳定的自定义供应商 id，例如 custom-relay-example-com。 */
+function providerIdFromBaseUrl(baseUrl: string): string {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase()
+    return `custom-${host.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}`
+  } catch {
+    return `custom-${Date.now()}`
+  }
+}
+
+// 文件导入：把「baseUrl + key」落到真正存在的供应商上。
+//
+// 以前这里只做映射（匹配不上内置厂商就写死 providerId 'custom'），既不创建供应商
+// 也不落盘 —— 中转站 / 自建网关的密钥全部堆进一个不存在的 'custom' 桶：界面看不到、
+// 也不会被探测，消息却还说「成功导入 N 个密钥」。现在：能匹配内置厂商就归内置；
+// 匹配不上但 baseUrl 合法，就自动建一个自定义供应商（域名作名字），并注册进引擎。
+ipcMain.handle(
+  'monitor:importCustom',
+  (
+    _event,
+    customEntries: Array<{ baseUrl: string; key: string; providerId?: string }>
+  ): { imported: number; createdIds: string[]; results: Array<{ providerId: string; key: string; created: boolean }> } => {
+    const keysMap = getApiKeys()
+    const results: Array<{ providerId: string; key: string; created: boolean }> = []
+    const createdIds: string[] = []
+
+    for (const entry of customEntries || []) {
+      const key = String(entry?.key ?? '').trim()
+      const baseUrl = String(entry?.baseUrl ?? '').trim()
+      if (!key) continue
+
+      // ① 渲染层已经认出厂商时直接用它
+      let providerId =
+        entry?.providerId && [...PROVIDERS, ...getCustomProviders()].some((p) => p.id === entry.providerId)
+          ? entry.providerId
+          : ''
+      // ② 按 baseUrl 匹配内置 / 已有自定义供应商
+      if (!providerId && baseUrl) providerId = matchProviderByBaseUrl(baseUrl)?.id ?? ''
+
+      let created = false
+      // ③ 还是没匹配上：只有 baseUrl 是合法 http(s) 才自动建供应商
+      if (!providerId) {
+        if (!/^https?:\/\//i.test(baseUrl)) continue
+        const sameBase = getCustomProviders().find(
+          (p) => normalizeBaseUrl(p.baseUrl) === normalizeBaseUrl(baseUrl)
+        )
+        if (sameBase) {
+          providerId = sameBase.id
+        } else {
+          const taken = new Set([...PROVIDERS, ...getCustomProviders()].map((p) => p.id))
+          const base = providerIdFromBaseUrl(baseUrl)
+          let id = base
+          let n = 2
+          while (taken.has(id)) id = `${base}-${n++}`
+          let hostName = baseUrl
+          try {
+            hostName = new URL(baseUrl).hostname
+          } catch {
+            /* 保持原样 */
+          }
+          const provider = addCustomProvider({
+            id,
+            name: hostName,
+            company: '自定义',
+            baseUrl,
+            models: ['gpt-4o-mini'],
+            protocol: 'openai',
+            category: 'custom',
+            note: '文件导入时自动创建',
+          })
+          monitorEngine.registerProviders([provider])
+          createdIds.push(provider.id)
+          providerId = provider.id
+          created = true
+        }
+      }
+
+      const list = keysMap[providerId] ? [...keysMap[providerId]] : []
+      if (list.includes(key)) continue
+      list.push(key)
+      keysMap[providerId] = list
+      results.push({ providerId, key, created })
+    }
+
+    if (results.length > 0) {
+      setApiKeys(keysMap)
+      for (const pid of new Set(results.map((r) => r.providerId))) {
+        const list = keysMap[pid]
+        const added = list
+          .map((k, i) => (results.some((r) => r.providerId === pid && r.key === k) ? i : -1))
+          .filter((i) => i >= 0)
+        monitorEngine.setKeys(pid, list, added)
+      }
+      // 新建了自定义供应商 → 让渲染层重新拉一次供应商列表，卡片才会出现
+      mainWindow?.webContents.send('providers:changed', createdIds)
+    }
+
+    return { imported: results.length, createdIds, results }
+  }
+)
+
 
 ipcMain.handle('monitor:detectKey', async (_event, key: string) => {
   return monitorEngine.detectKey(key)

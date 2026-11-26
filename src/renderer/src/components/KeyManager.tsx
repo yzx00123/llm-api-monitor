@@ -73,6 +73,14 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
   const [unknownKeys, setUnknownKeys] = useState<UnknownKey[]>([])
   const [bulkAssign, setBulkAssign] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // 消息自清计时器：上一次导入的「清空」定时器会把下一次导入的提示提前抹掉
+  // （连续导入文件时只看到「成功导入」，后面几次的提示一闪而过），所以统一走 flash。
+  const msgTimer = useRef<number | null>(null)
+  const flash = useCallback((text: string, ms = 6000) => {
+    if (msgTimer.current) window.clearTimeout(msgTimer.current)
+    setMsg(text)
+    msgTimer.current = window.setTimeout(() => setMsg(''), ms)
+  }, [])
 
   const handleBulkImport = useCallback(async () => {
     const rawLines = bulkText.trim()
@@ -130,10 +138,9 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
       setUnknownKeys(failedKeys.map((k) => ({ key: k, providerId: '' })))
     }
 
-    setMsg(summary)
+    flash(summary, 8000)
     setBulkText('')
-    setTimeout(() => setMsg(''), 6000)
-  }, [bulkText, bulkProvider, providers, keys, onKeysChange])
+  }, [bulkText, bulkProvider, providers, keys, onKeysChange, flash])
 
   const confirmUnknownKeys = useCallback(async () => {
     const newKeys: Record<string, string[]> = { ...keys }
@@ -146,11 +153,10 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
     }
     await onKeysChange(newKeys)
     const assignedCount = unknownKeys.filter((uk) => uk.providerId || bulkAssign).length
-    setMsg(`已手动分配 ${assignedCount} 个密钥`)
+    flash(`已手动分配 ${assignedCount} 个密钥`, 4000)
     setUnknownKeys([])
     setBulkAssign('')
-    setTimeout(() => setMsg(''), 4000)
-  }, [unknownKeys, bulkAssign, keys, onKeysChange])
+  }, [unknownKeys, bulkAssign, keys, onKeysChange, flash])
 
   const cancelUnknownKeys = useCallback(() => {
     setUnknownKeys([])
@@ -167,37 +173,109 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
     return () => window.removeEventListener('keydown', onKey)
   }, [unknownKeys.length, cancelUnknownKeys])
 
+  // 文件导入：.json / .csv / .txt
+  //
+  // 这里以前有几个坑：扩展名大小写敏感（清单.CSV 静默无反应）、只支持「数组」这一种
+  // JSON 形状（{ "deepseek": ["sk-1"] } 这种映射格式静默 0 条）、匹配不上厂商的条目
+  // 交给主进程后被塞进不存在的 providerId 'custom'（界面看不到、也不会被探测），
+  // 而提示照样说「成功导入 N 个密钥」。现在统一解析成 { providerId, baseUrl, key }
+  // 交给主进程，由主进程匹配/新建供应商并真正落盘，界面按结果如实报告。
   async function handleFileImport(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
-    const text = await readTextFile(file)
+    const name = file.name
+    const dot = name.lastIndexOf('.')
+    const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : ''
+
+    const normUrl = (u: string) => (u || '').trim().replace(/\/+$/, '').toLowerCase()
+    const matchProvider = (wanted: string) => {
+      const w = (wanted || '').trim().toLowerCase()
+      if (!w) return undefined
+      return providers.find(
+        (p) =>
+          p.id.toLowerCase() === w ||
+          p.name.toLowerCase() === w ||
+          (p.baseUrl ? p.baseUrl.toLowerCase().includes(w) : false)
+      )
+    }
+
     try {
-      if (file.name.endsWith('.json')) {
-        const data = JSON.parse(text) as Array<Record<string, string>>
-        const entries: Array<{ baseUrl: string; key: string }> = []
-        for (const item of Array.isArray(data) ? data : [data]) {
-          // 只有带了 baseUrl 才按 baseUrl 做模糊匹配。以前写成
-          // `p.baseUrl.includes(item.baseUrl || '')`，item.baseUrl 为空时是
-          // includes('')，恒为 true —— 任何没写 baseUrl 的条目都会被塞进数组第一家
-          // （PROVIDERS[0]），provider 字段写对了也白写。
-          const wantedId = (item.provider ?? '').toLowerCase()
-          const byId = providers.find(
-            (p) => p.id === item.provider || p.name.toLowerCase() === wantedId
+      const text = await readTextFile(file)
+      const entries: Array<{ baseUrl: string; key: string; providerId?: string }> = []
+      let skipped = 0
+
+      const pushEntry = (providerId: string | undefined, baseUrl: string, key: string) => {
+        const k = (key || '').trim()
+        if (!baseUrl || !k) {
+          skipped += 1
+          return
+        }
+        entries.push({ baseUrl, key: k, providerId })
+      }
+
+      if (ext === 'json') {
+        const data = JSON.parse(text) as unknown
+        const items: Array<Record<string, unknown>> = []
+        if (Array.isArray(data)) {
+          for (const one of data) {
+            if (one && typeof one === 'object') items.push(one as Record<string, unknown>)
+          }
+        } else if (data && typeof data === 'object') {
+          const obj = data as Record<string, unknown>
+          // 先认「单条记录」：{ provider, baseUrl, key } 这种写法里 provider 本身是字符串，
+          // 如果直接走下面的「厂商 → 密钥」映射遍历，会把 provider/key 字段名当成厂商名。
+          const keyField = ['key', 'api_key', 'apiKey', 'token'].find((f) => typeof obj[f] === 'string')
+          const singleRecord =
+            Boolean(keyField) &&
+            (typeof obj.baseUrl === 'string' ||
+              typeof obj.provider === 'string' ||
+              typeof obj.providerId === 'string')
+          if (singleRecord) {
+            items.push(obj)
+          } else {
+            // 兼容 {"apiKeys": {...}} 包一层的情况
+            const holder =
+              obj.apiKeys && typeof obj.apiKeys === 'object' && !Array.isArray(obj.apiKeys)
+                ? (obj.apiKeys as Record<string, unknown>)
+                : obj
+            let mapped = 0
+            for (const [k, v] of Object.entries(holder)) {
+              if (typeof v === 'string') {
+                items.push({ provider: k, key: v })
+                mapped += 1
+              } else if (Array.isArray(v)) {
+                for (const one of v) {
+                  if (typeof one === 'string') {
+                    items.push({ provider: k, key: one })
+                    mapped += 1
+                  }
+                }
+              }
+            }
+            // 不是「厂商 → 密钥」映射，就当单条记录处理
+            if (mapped === 0) items.push(obj)
+          }
+        }
+
+        for (const item of items) {
+          const wantedId = String(item.provider ?? item.providerId ?? '')
+          const byId = matchProvider(wantedId)
+          const baseUrlRaw = typeof item.baseUrl === 'string' ? item.baseUrl : ''
+          const byUrl =
+            !byId && baseUrlRaw
+              ? providers.find((p) => normUrl(p.baseUrl) === normUrl(baseUrlRaw)) ??
+                providers.find(
+                  (p) => p.baseUrl && p.baseUrl.toLowerCase().includes(baseUrlRaw.toLowerCase())
+                )
+              : undefined
+          const provider = byId ?? byUrl
+          pushEntry(
+            provider?.id,
+            provider?.baseUrl || baseUrlRaw,
+            String(item.key ?? item.api_key ?? item.apiKey ?? item.token ?? '')
           )
-          const provider = byId ?? (item.baseUrl ? providers.find((p) => p.baseUrl.includes(item.baseUrl)) : undefined)
-          const baseUrl = provider?.baseUrl || item.baseUrl || ''
-          const key = item.key || item.api_key || item.apiKey || item.token || ''
-          if (baseUrl && key) entries.push({ baseUrl, key })
         }
-        const matched = await window.electronAPI.importCustom(entries)
-        const newKeys: Record<string, string[]> = { ...keys }
-        for (const m of matched) {
-          if (!newKeys[m.providerId]) newKeys[m.providerId] = []
-          if (!newKeys[m.providerId].includes(m.key)) newKeys[m.providerId].push(m.key)
-        }
-        await onKeysChange(newKeys)
-        setMsg(`从 ${file.name} 成功导入 ${entries.length} 个密钥`)
-      } else if (file.name.endsWith('.csv') || file.name.endsWith('.txt')) {
+      } else if (ext === 'csv' || ext === 'txt') {
         // 按行切，再解析每行的「厂商,密钥」/「厂商|密钥」/全角逗号。
         // 以前这里复用 parseKeysFromText —— 它内部按 /[\r\n,]+/ 切分，逗号在切行时
         // 就被吃掉了，于是每行都不再包含分隔符，CSV 导入恒为 0 条却提示「成功导入」。
@@ -205,40 +283,64 @@ export default function KeyManager({ providers, keys, labels, onKeysChange }: Pr
           .split(/\r?\n/)
           .map((l) => l.trim())
           .filter((l) => l.length > 0 && !l.startsWith('#'))
-        const entries: Array<{ baseUrl: string; key: string }> = []
         for (const line of rawLines) {
           const parts = line.split(/[,|，\t]/).map((s) => s.trim())
-          if (parts.length < 2) continue
+          if (parts.length < 2) {
+            skipped += 1
+            continue
+          }
           const [a, b] = parts
-          if (!a || !b) continue
-          const provider = providers.find(
-            (p) =>
-              p.id === a.toLowerCase() ||
-              p.name.toLowerCase() === a.toLowerCase() ||
-              p.baseUrl.includes(a)
-          )
+          const provider = matchProvider(a)
           const baseUrl = provider?.baseUrl || (a.includes('://') ? a : '')
-          if (!baseUrl) continue
-          entries.push({ baseUrl, key: b })
+          pushEntry(provider?.id, baseUrl, b)
         }
-        const matched = await window.electronAPI.importCustom(entries)
-        const newKeys: Record<string, string[]> = { ...keys }
-        for (const m of matched) {
-          if (!newKeys[m.providerId]) newKeys[m.providerId] = []
-          if (!newKeys[m.providerId].includes(m.key)) newKeys[m.providerId].push(m.key)
-        }
-        await onKeysChange(newKeys)
-        setMsg(
-          entries.length > 0
-            ? `从 ${file.name} 成功导入 ${entries.length} 个密钥`
-            : `没有从 ${file.name} 解析出密钥：每行格式应为「厂商,密钥」或「厂商|密钥」`
+      } else {
+        flash(
+          '不支持的文件类型「' +
+            name +
+            '」：请导出为 .json / .csv / .txt 再导入（也可以直接粘贴到上方输入框）',
+          8000
         )
+        return
       }
+
+      if (entries.length === 0) {
+        const hint =
+          ext === 'json'
+            ? 'JSON 每条记录需要 baseUrl 与 key（或 provider + key，且 provider 是已知厂商）'
+            : '每行格式应为「厂商,密钥」或「厂商|密钥」'
+        flash('没有从「' + name + '」里解析出密钥：' + hint, 8000)
+        return
+      }
+
+      const res = await window.electronAPI.importCustom(entries)
+      const newKeys: Record<string, string[]> = { ...keys }
+      for (const m of res.results) {
+        if (!newKeys[m.providerId]) newKeys[m.providerId] = []
+        if (!newKeys[m.providerId].includes(m.key)) newKeys[m.providerId].push(m.key)
+      }
+      await onKeysChange(newKeys)
+
+      // 主进程可能顺手新建了自定义供应商（中转站/自建网关），名字要从最新列表里取
+      const allProviders =
+        res.createdIds.length > 0 ? await window.electronAPI.getProviders() : providers
+      const createdNames = res.createdIds.map(
+        (id) => allProviders.find((p) => p.id === id)?.name ?? id
+      )
+      let summary =
+        res.imported > 0
+          ? '从「' + name + '」导入 ' + res.imported + ' 个密钥'
+          : '「' + name + '」里的密钥都已存在，没有新增'
+      if (createdNames.length > 0) {
+        summary += '，新建供应商 ' + createdNames.length + ' 个（' + createdNames.join('、') + '）'
+      }
+      if (skipped > 0) summary += '，跳过 ' + skipped + ' 条无法识别的记录'
+      flash(summary, 8000)
     } catch (err) {
-      setMsg('文件解析失败：' + (err instanceof Error ? err.message : String(err)))
+      flash('文件解析失败：' + (err instanceof Error ? err.message : String(err)), 8000)
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = ''
     }
-    if (fileInputRef.current) fileInputRef.current.value = ''
-    setTimeout(() => setMsg(''), 4000)
   }
 
   async function handleRemoveKey(providerId: string, keyIndex: number) {

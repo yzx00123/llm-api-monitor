@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('monitor:start', providerIds, intervalMs),
   stopMonitoring: () => ipcRenderer.invoke('monitor:stop'),
   checkNow: (providerId: string, keyIndex?: number) => ipcRenderer.invoke('monitor:checkNow', providerId, keyIndex),
-  importCustom: (entries: Array<{ baseUrl: string; key: string }>) =>
+  importCustom: (entries: Array<{ baseUrl: string; key: string; providerId?: string }>) =>
     ipcRenderer.invoke('monitor:importCustom', entries),
   detectKey: (key: string) => ipcRenderer.invoke('monitor:detectKey', key),
   mimoConnect: (keySuffix?: string) => ipcRenderer.invoke('monitor:mimoConnect', keySuffix),
@@ -66,6 +66,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('monitor:state', (_event, state) => callback(state))
     return () => {
       ipcRenderer.removeAllListeners('monitor:state')
+    }
+  },
+  // 文件导入时主进程可能自动新建自定义供应商，通知界面重新拉供应商列表
+  onProvidersChanged: (callback: (createdIds: string[]) => void) => {
+    ipcRenderer.on('providers:changed', (_event, createdIds) => callback(createdIds ?? []))
+    return () => {
+      ipcRenderer.removeAllListeners('providers:changed')
     }
   },
 })

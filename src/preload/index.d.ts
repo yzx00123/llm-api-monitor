@@ -30,7 +30,7 @@ export interface ElectronAPI {
   startMonitoring: (providerIds: string[], intervalMs: number) => Promise<boolean>
   stopMonitoring: () => Promise<boolean>
   checkNow: (providerId: string, keyIndex?: number) => Promise<boolean>
-  importCustom: (entries: Array<{ baseUrl: string; key: string }>) => Promise<Array<{ baseUrl: string; key: string; providerId: string }>>
+  importCustom: (entries: Array<{ baseUrl: string; key: string; providerId?: string }>) => Promise<ImportCustomResult>
   detectKey: (key: string) => Promise<string | null>
   /**
    * 登录某把密钥所属的小米账号控制台（一个账号一条会话，互不串号）。
@@ -82,6 +82,17 @@ export interface ElectronAPI {
   onStatusUpdate: (callback: (statuses: Record<string, ProviderStatus>) => void) => () => void
   /** 监测开关的真实状态（托盘里点开始/停止、主进程自动恢复轮询都会推送） */
   onMonitoringState: (callback: (state: { monitoring: boolean }) => void) => () => void
+  /** 文件导入时主进程可能自动新建自定义供应商，界面收到后应重新拉供应商列表 */
+  onProvidersChanged: (callback: (createdIds: string[]) => void) => () => void
+}
+
+export interface ImportCustomResult {
+  /** 真正新增的密钥数量（已存在的会跳过） */
+  imported: number
+  /** 这次导入顺手新建的自定义供应商 id 列表 */
+  createdIds: string[]
+  /** 每条密钥最终归属的供应商 */
+  results: Array<{ providerId: string; key: string; created: boolean }>
 }
 
 export interface LatencyTestResult {

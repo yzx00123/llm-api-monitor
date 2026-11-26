@@ -134,6 +134,15 @@ export default function App() {
     })
   }, [])
 
+  // 文件导入时主进程可能自动新建自定义供应商（中转站 / 自建网关）：收到通知就重新
+  // 拉一遍供应商与密钥，否则新卡片要等下次手动刷新才出现。
+  useEffect(() => {
+    return window.electronAPI.onProvidersChanged(() => {
+      void window.electronAPI.getProviders().then(setProviders)
+      void window.electronAPI.getKeys().then(setKeys)
+    })
+  }, [])
+
   // Follow OS theme while in 'system' mode
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
