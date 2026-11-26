@@ -46,6 +46,10 @@ export interface ElectronAPI {
   bailianLogin: () => Promise<BailianLoginResult>
   /** 退出百炼控制台登录（清 cookie）。 */
   bailianLogout: () => Promise<{ ok: boolean }>
+  /** 读取已导入的小米 MiMo 历史账单汇总。 */
+  mimoGetBills: () => Promise<MimoBillSummary>
+  /** 从 MiMo 控制台导入最近 N 个月的历史账单（默认 12）。 */
+  mimoImportBills: (months?: number) => Promise<MimoBillSummary>
   /** Send custom text+model to one provider and measure latency.
    *  Omitted fields fall back to the saved 测延迟 settings. */
   latencyTest: (opts: {
@@ -206,6 +210,43 @@ export interface BailianLoginResult {
   ok: boolean
   rows?: FreeQuotaRow[]
   summary?: FreeQuotaSummary
+  error?: string
+}
+
+/** 小米 MiMo 历史账单（从控制台导入，按天 × 模型 × 密钥）。 */
+export interface MimoBillDay {
+  date: string
+  cost: number
+  token: number
+  requests: number
+}
+
+export interface MimoBillModel {
+  model: string
+  cost: number
+  token: number
+}
+
+export interface MimoBillSummary {
+  ok: boolean
+  /** 最后一次导入时间；没导入过是 null。 */
+  importedAt: number | null
+  /** 明细条数。 */
+  rows: number
+  /** 覆盖范围（首/末日期）。 */
+  first: string | null
+  last: string | null
+  totalCost: number
+  totalToken: number
+  requests: number
+  days: MimoBillDay[]
+  models: MimoBillModel[]
+  /** 本次拉取的明细条数（仅导入时返回）。 */
+  fetched?: number
+  /** 各月拉取情况（仅导入时返回）。 */
+  months?: Array<{ year: number; month: number; rows: number; cost: number }>
+  /** true = 控制台登录态失效，需要重新点「连接控制台」。 */
+  needLogin?: boolean
   error?: string
 }
 

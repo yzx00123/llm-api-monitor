@@ -41,7 +41,14 @@ const USAGE_URL =
   process.env.MIMO_USAGE_URL?.trim() || 'https://platform.xiaomimimo.com/api/v1/usage'
 const APIKEYS_URL =
   process.env.MIMO_APIKEYS_URL?.trim() || 'https://platform.xiaomimimo.com/api/v1/apiKeys'
-const COOKIE_NAMES = new Set(['api-platform_serviceToken', 'userId'])
+const COOKIE_NAMES = new Set([
+  'api-platform_serviceToken',
+  'userId',
+  // slh 是「静默加载控制台页面」时服务端认人用的，缺了它页面会直接跳 SSO 登录页；
+  // ph 是账单接口签名要用的短票据（页面加载时会换新，存下来只是为了首次灌 cookie）。
+  'api-platform_slh',
+  'api-platform_ph',
+])
 const POLL_MS = 800
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 
@@ -115,9 +122,12 @@ async function readSessionCookie(sess: Session): Promise<string> {
   }
   const token = pickOne('api-platform_serviceToken')
   if (!token) return ''
-  const uid = pickOne('userId')
   const parts = [`${token.name}=${token.value}`]
-  if (uid) parts.push(`${uid.name}=${uid.value}`)
+  // 多存 slh / ph：账单导入时要用它们在没有界面的情况下把控制台页面加载起来。
+  for (const extra of ['userId', 'api-platform_slh', 'api-platform_ph']) {
+    const row = pickOne(extra)
+    if (row) parts.push(`${row.name}=${row.value}`)
+  }
   return parts.join('; ')
 }
 

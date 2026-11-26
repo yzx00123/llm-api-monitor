@@ -37,7 +37,12 @@ import {
   clearBrokeAlerted,
   migrateMimoSessions,
   syncFlushSamples,
+  getMimoSessions,
+  getMimoBill,
+  saveMimoBill,
+  type StoredMimoBillRow,
 } from './store'
+import { fetchMimoBills } from './mimoBill'
 import { buildDailyReport, buildUsageReport, buildReportCsv, buildTokenReport } from './report'
 import {
   applyAgentExport,
@@ -820,6 +825,82 @@ ipcMain.handle('bailian:login', async () => {
 ipcMain.handle('bailian:logout', async () => {
   await logoutBailian()
   return { ok: true }
+})
+
+// ===== 小米 MiMo 历史账单（控制台签名接口，导入到本地账本） =====
+
+/** 把账本里的历史账单聚合成界面要的汇总（按天 / 按模型）。 */
+function summarizeMimoBill(rows: StoredMimoBillRow[]) {
+  const byDay = new Map<string, { date: string; cost: number; token: number; requests: number }>()
+  const byModel = new Map<string, { model: string; cost: number; token: number }>()
+  let totalCost = 0
+  let totalToken = 0
+  let requests = 0
+  for (const row of rows) {
+    totalCost += row.c
+    totalToken += row.t
+    requests += row.r
+    const day = byDay.get(row.d) ?? { date: row.d, cost: 0, token: 0, requests: 0 }
+    day.cost += row.c
+    day.token += row.t
+    day.requests += row.r
+    byDay.set(row.d, day)
+    const model = byModel.get(row.m) ?? { model: row.m, cost: 0, token: 0 }
+    model.cost += row.c
+    model.token += row.t
+    byModel.set(row.m, model)
+  }
+  const round = (n: number) => Math.round(n * 10000) / 10000
+  return {
+    rows: rows.length,
+    first: rows[0]?.d ?? null,
+    last: rows[rows.length - 1]?.d ?? null,
+    totalCost: round(totalCost),
+    totalToken,
+    requests,
+    days: [...byDay.values()].sort((a, b) => (a.date < b.date ? -1 : 1)).map((d) => ({ ...d, cost: round(d.cost) })),
+    models: [...byModel.values()]
+      .sort((a, b) => b.cost - a.cost)
+      .map((m) => ({ ...m, cost: round(m.cost) })),
+  }
+}
+
+ipcMain.handle('mimo:getBills', () => {
+  const bill = getMimoBill()
+  return { ok: true, importedAt: bill?.importedAt ?? null, ...summarizeMimoBill(bill?.rows ?? []) }
+})
+
+ipcMain.handle('mimo:importBills', async (_event, months?: number) => {
+  // 余额/账单都挂在「控制台账号」上：取已登录的那条会话（多账号时按最后导入的会话走）。
+  const sessions = getMimoSessions()
+  const sess = sessions[sessions.length - 1]
+  if (!sess) {
+    return { ok: false, needLogin: true, error: '还没有登录小米控制台，请先点卡片上的「连接控制台」' }
+  }
+  const result = await fetchMimoBills({ cookie: sess.cookie, months })
+  if (!result.ok) return result
+  // 按「日期 + 模型 + 密钥」合并，重复导入不会翻倍。
+  const merged = new Map<string, StoredMimoBillRow>()
+  for (const row of getMimoBill()?.rows ?? []) merged.set(`${row.d}|${row.m}|${row.k}`, row)
+  for (const row of result.rows) {
+    merged.set(`${row.date}|${row.model}|${row.apiKey}`, {
+      d: row.date,
+      m: row.model,
+      k: row.apiKey,
+      c: row.cost,
+      t: row.totalToken,
+      r: row.requests,
+    })
+  }
+  const rows = [...merged.values()].sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0))
+  saveMimoBill({ importedAt: Date.now(), rows })
+  return {
+    ok: true,
+    fetched: result.rows.length,
+    months: result.months,
+    importedAt: Date.now(),
+    ...summarizeMimoBill(rows),
+  }
 })
 
 ipcMain.handle(

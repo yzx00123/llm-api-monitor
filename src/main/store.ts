@@ -157,11 +157,34 @@ const HISTORY_FORMAT = 1
  *   · 落盘用「写临时文件 + rename」，不会留下写一半的坏 JSON；
  *   · 老版本留在主配置里的三份流水第一次落盘后自动删掉（迁移不丢数据）。
  */
+/** 从 MiMo 控制台导入的历史账单（控制台口径：按天 × 模型 × 密钥）。短键是为了省体积。 */
+export interface StoredMimoBillRow {
+  /** 日期，YYYY-MM-DD */
+  d: string
+  /** 模型 */
+  m: string
+  /** 密钥（控制台返回的脱敏形式） */
+  k: string
+  /** 当天花费 */
+  c: number
+  /** token 合计 */
+  t: number
+  /** 请求数 */
+  r: number
+}
+
+export interface StoredMimoBill {
+  /** 最后一次导入时间 */
+  importedAt: number
+  rows: StoredMimoBillRow[]
+}
+
 interface HistoryFile {
   v: number
   balance: BalanceSample[]
   usage: UsageSample[]
   probeUsage: Record<string, Record<string, ProbeUsageDay>>
+  mimoBill?: StoredMimoBill | null
 }
 
 function historyPath(): string {
@@ -256,6 +279,7 @@ function decodeUsage(rows: UsageSample[]): UsageSample[] {
 let balanceCache: BalanceSample[] | null = null
 let usageCache: UsageSample[] | null = null
 let probeUsageCache: Record<string, Record<string, ProbeUsageDay>> | null = null
+let mimoBillCache: StoredMimoBill | null = null
 let sampleFlushTimer: ReturnType<typeof setTimeout> | null = null
 let historyLoaded = false
 /** 本次进程是否从主配置里接管了老流水（迁移完要把配置里那三坨大数组删掉）。 */
@@ -272,6 +296,7 @@ function ensureHistoryLoaded(): void {
         balanceCache = decodeBalance(parsed.balance ?? [])
         usageCache = decodeUsage(parsed.usage ?? [])
         probeUsageCache = parsed.probeUsage ?? {}
+        mimoBillCache = parsed.mimoBill ?? null
         return
       }
       console.warn('[history] unknown format, rebuilding:', parsed.v)
@@ -308,6 +333,7 @@ export function syncFlushSamples(): void {
     balance: encodeBalance(pruneBalance(balanceCache ?? [])),
     usage: encodeUsage(pruneUsage(usageCache ?? [])),
     probeUsage: probeUsageCache ?? {},
+    mimoBill: mimoBillCache,
   }
   try {
     const file = historyPath()
@@ -401,6 +427,19 @@ export function getProbeUsage(): Record<string, Record<string, ProbeUsageDay>> {
   ensureHistoryLoaded()
   if (!probeUsageCache) probeUsageCache = {}
   return probeUsageCache
+}
+
+/** 已导入的 MiMo 控制台历史账单（没导入过返回 null）。 */
+export function getMimoBill(): StoredMimoBill | null {
+  ensureHistoryLoaded()
+  return mimoBillCache
+}
+
+/** 保存导入结果；传 null 表示清空。 */
+export function saveMimoBill(bill: StoredMimoBill | null): void {
+  ensureHistoryLoaded()
+  mimoBillCache = bill
+  scheduleSampleFlush()
 }
 
 /**

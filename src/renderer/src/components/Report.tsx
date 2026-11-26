@@ -7,6 +7,7 @@ import type {
   UsageReport
 } from '../preload'
 import { BailianQuotaPanel } from './BailianQuotaPanel'
+import { MimoBillPanel } from './MimoBillPanel'
 
 interface ReportProps {
   onBack: () => void
@@ -575,6 +576,7 @@ export default function Report({ onBack }: ReportProps): React.JSX.Element {
         </>
       )}
 
+      <MimoBillPanel />
       <BailianQuotaPanel />
 
       <p className="report-note">

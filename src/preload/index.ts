@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   bailianGetQuota: (force?: boolean) => ipcRenderer.invoke('bailian:getQuota', force),
   bailianLogin: () => ipcRenderer.invoke('bailian:login'),
   bailianLogout: () => ipcRenderer.invoke('bailian:logout'),
+  mimoGetBills: () => ipcRenderer.invoke('mimo:getBills'),
+  mimoImportBills: (months?: number) => ipcRenderer.invoke('mimo:importBills', months),
   latencyTest: (opts: {
     providerId: string
     key: string
