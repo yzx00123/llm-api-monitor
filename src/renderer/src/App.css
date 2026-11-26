@@ -968,6 +968,7 @@ body {
   align-items: baseline;
   gap: 6px;
   min-width: 0;
+  overflow: hidden;
 }
 .box-latency {
   font-size: 17px;

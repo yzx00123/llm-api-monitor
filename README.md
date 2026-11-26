@@ -110,6 +110,14 @@ src/
 
 ## 更新日志
 
+### v1.5.5
+
+- 修复：**小米 MiMo 账单导入只认最后一个账号会话**。以前连过多个小米控制台账号时，「导入最近 18 个月」只用 `sessions[sessions.length - 1]` 那一条会话去拉，其余账号的账单永远进不了账本（用户实测：连了 7002，7001 的账单就拉不到）。现在遍历所有已登录会话逐个拉取、按「日期 × 模型 × 密钥 × 账号」合并落盘，单个账号登录态失效不拖垮其余账号（成功的照常导入，失败的原因如实报出来）。
+- 新增：**账单面板按控制台账号分组**。汇总里新增「按控制台账号」表（花费 / Token / 请求 / 明细条数，成本降序），多账号各算各的；老数据没有账号字段的归入「未知账号」。
+- 修复：**卡片上「限流」徽标和余额徽标重叠**（限流时间戳把右侧余额顶出边界）。`.box-left` 补了 `overflow: hidden`，左侧内容超宽时被裁掉而不是压到余额上。
+- 自测：**密钥管理的文件导入这次真的跑上测试了**。解析逻辑从 React 组件里抽成纯函数 `src/renderer/src/lib/parseKeyFile.ts`（组件只负责读文件和提示），配套 `scripts/test-keyfile-import.ts` 40 个用例：JSON 数组 / 厂商映射 / `apiKeys` 包装 / 单条记录 / 中转站 baseUrl、CSV 逗号不被切行吃掉、竖线与全角逗号与制表符分隔、注释行与坏行计数、厂商名大小写、坏 JSON 抛错，以及编码判定（UTF-8 / UTF-8 BOM / GBK 回退 / UTF-16LE BOM）。`node scripts/test-keyfile-import.ts` 40 通过 0 失败。
+- 说明：解析逻辑是原样搬迁（KeyManager.tsx 只是改成调用抽出来的函数），行为不变；测试覆盖的是历史上踩过的坑（CSV 恒 0 条、映射格式静默 0 条、GBK 乱码）。
+
 ### v1.5.4
 
 - 修复：**托盘图标变成一个空白方块、任务栏图标也丢了**。打包脚本 `npm run dist` 是直接跑 `electron-vite build` 再让 electron-builder 打包的，跳过了把 `icon.ico` / `icon.png` 复制进 `out/main` 的 postbuild 步骤；而 `electron-vite build` 会先清空 `out/` 目录 —— 结果打出来的 `app.asar` 里只有 `out/main/index.js`，没有图标文件，托盘 `new Tray(nativeImage.createEmpty())` 自然是块白板。现在 `npm run dist` 改成走 `npm run build`（含 postbuild），postbuild 自己也加了「目录不存在就创建、源图标缺失直接报错」，避免以后再悄悄漏掉。

@@ -65,7 +65,13 @@ export function MimoBillPanel(): JSX.Element | null {
       const data = await window.electronAPI.mimoImportBills(18)
       setSummary(data)
       if (data.ok) {
-        setMessage(`已导入 ${data.fetched ?? 0} 条明细，账本共 ${data.rows} 条`)
+        const n = data.accounts?.length ?? 0
+        const scope = n > 1 ? `（${n} 个控制台账号）` : ''
+        setMessage(`已导入 ${data.fetched ?? 0} 条明细${scope}，账本共 ${data.rows} 条`)
+        if (data.partial) {
+          // 部分账号失败：其余账号已经导入成功，如实提示但不当成整体失败。
+          setError(`部分账号没拉到：${data.error ?? '未知原因'}（其余账号已导入）`)
+        }
       } else if (data.needLogin) {
         setMessage('')
         setError(data.error ?? '小米控制台登录已过期，请点卡片上的「连接控制台」重新登录一次')
@@ -117,7 +123,7 @@ export function MimoBillPanel(): JSX.Element | null {
               <div className="report-stat">
                 <div className="report-stat-label">明细条数</div>
                 <div className="report-stat-value">{summary.rows}</div>
-                <div className="report-stat-hint">按天 × 模型 × 密钥</div>
+                <div className="report-stat-hint">按天 × 模型 × 密钥 × 账号</div>
               </div>
               <div className="report-stat">
                 <div className="report-stat-label">覆盖天数</div>
@@ -137,6 +143,37 @@ export function MimoBillPanel(): JSX.Element | null {
             </div>
 
             <div className="mimo-bill-groups">
+              {(summary.accounts?.length ?? 0) > 0 && (
+                <div className="mimo-bill-group">
+                  <h3 className="mimo-bill-title">按控制台账号</h3>
+                  <table className="report-table">
+                    <thead>
+                      <tr>
+                        <th>账号</th>
+                        <th className="report-num">花费</th>
+                        <th className="report-num">Token</th>
+                        <th className="report-num">请求</th>
+                        <th className="report-num">明细</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(summary.accounts ?? []).map((row) => (
+                        <tr key={row.accountId ?? '__unknown__'}>
+                          <td>
+                            <code className="bailian-model">
+                              {row.accountId ? `账号 …${row.accountId.slice(-6)}` : '未知账号（老数据）'}
+                            </code>
+                          </td>
+                          <td className="report-num">{formatCost(row.cost)}</td>
+                          <td className="report-num">{formatTokens(row.token)}</td>
+                          <td className="report-num">{row.requests.toLocaleString('zh-CN')}</td>
+                          <td className="report-num">{row.rows}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
               <div className="mimo-bill-group">
                 <h3 className="mimo-bill-title">按模型</h3>
                 <table className="report-table">

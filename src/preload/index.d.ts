@@ -227,6 +227,18 @@ export interface MimoBillModel {
   token: number
 }
 
+/** 按控制台账号分开统计的账单汇总（多账号各算各的）。 */
+export interface MimoBillAccount {
+  /** 控制台账号 userId；老数据没有账号字段时为 null（记为「未知账号」）。 */
+  accountId: string | null
+  rows: number
+  cost: number
+  token: number
+  requests: number
+  first: string
+  last: string
+}
+
 export interface MimoBillSummary {
   ok: boolean
   /** 最后一次导入时间；没导入过是 null。 */
@@ -241,12 +253,16 @@ export interface MimoBillSummary {
   requests: number
   days: MimoBillDay[]
   models: MimoBillModel[]
+  /** 按控制台账号分组的汇总（成本降序）。 */
+  accounts?: MimoBillAccount[]
   /** 本次拉取的明细条数（仅导入时返回）。 */
   fetched?: number
   /** 各月拉取情况（仅导入时返回）。 */
   months?: Array<{ year: number; month: number; rows: number; cost: number }>
   /** true = 控制台登录态失效，需要重新点「连接控制台」。 */
   needLogin?: boolean
+  /** true = 部分账号导入失败，其余已成功（error 里是失败原因）。 */
+  partial?: boolean
   error?: string
 }
 

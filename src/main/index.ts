@@ -829,10 +829,15 @@ ipcMain.handle('bailian:logout', async () => {
 
 // ===== 小米 MiMo 历史账单（控制台签名接口，导入到本地账本） =====
 
-/** 把账本里的历史账单聚合成界面要的汇总（按天 / 按模型）。 */
+/** 把账本里的历史账单聚合成界面要的汇总（按天 / 按模型 / 按控制台账号）。 */
 function summarizeMimoBill(rows: StoredMimoBillRow[]) {
   const byDay = new Map<string, { date: string; cost: number; token: number; requests: number }>()
   const byModel = new Map<string, { model: string; cost: number; token: number }>()
+  // 按控制台账号分开统计：用户连了多个小米账号时，账单必须各算各的。
+  const byAccount = new Map<
+    string,
+    { accountId: string | null; rows: number; cost: number; token: number; requests: number; first: string; last: string }
+  >()
   let totalCost = 0
   let totalToken = 0
   let requests = 0
@@ -849,6 +854,17 @@ function summarizeMimoBill(rows: StoredMimoBillRow[]) {
     model.cost += row.c
     model.token += row.t
     byModel.set(row.m, model)
+    const acct = row.a ?? null
+    const acc =
+      byAccount.get(acct ?? '') ??
+      { accountId: acct, rows: 0, cost: 0, token: 0, requests: 0, first: row.d, last: row.d }
+    acc.rows += 1
+    acc.cost += row.c
+    acc.token += row.t
+    acc.requests += row.r
+    if (row.d < acc.first) acc.first = row.d
+    if (row.d > acc.last) acc.last = row.d
+    byAccount.set(acct ?? '', acc)
   }
   const round = (n: number) => Math.round(n * 10000) / 10000
   return {
@@ -862,6 +878,9 @@ function summarizeMimoBill(rows: StoredMimoBillRow[]) {
     models: [...byModel.values()]
       .sort((a, b) => b.cost - a.cost)
       .map((m) => ({ ...m, cost: round(m.cost) })),
+    accounts: [...byAccount.values()]
+      .sort((a, b) => b.cost - a.cost)
+      .map((a) => ({ ...a, cost: round(a.cost) })),
   }
 }
 
@@ -871,34 +890,55 @@ ipcMain.handle('mimo:getBills', () => {
 })
 
 ipcMain.handle('mimo:importBills', async (_event, months?: number) => {
-  // 余额/账单都挂在「控制台账号」上：取已登录的那条会话（多账号时按最后导入的会话走）。
+  // 余额/账单都挂在「控制台账号」上：把每条已登录会话都拉一遍，按账号分开落账，
+  // 不再只取最后一个会话（用户实测：连了 7002，7001 的账单就永远拉不到）。
   const sessions = getMimoSessions()
-  const sess = sessions[sessions.length - 1]
-  if (!sess) {
+  if (sessions.length === 0) {
     return { ok: false, needLogin: true, error: '还没有登录小米控制台，请先点卡片上的「连接控制台」' }
   }
-  const result = await fetchMimoBills({ cookie: sess.cookie, months })
-  if (!result.ok) return result
-  // 按「日期 + 模型 + 密钥」合并，重复导入不会翻倍。
+  // 按「日期 + 模型 + 密钥 + 账号」合并，重复导入不会翻倍，不同账号也不会互相覆盖。
   const merged = new Map<string, StoredMimoBillRow>()
-  for (const row of getMimoBill()?.rows ?? []) merged.set(`${row.d}|${row.m}|${row.k}`, row)
-  for (const row of result.rows) {
-    merged.set(`${row.date}|${row.model}|${row.apiKey}`, {
-      d: row.date,
-      m: row.model,
-      k: row.apiKey,
-      c: row.cost,
-      t: row.totalToken,
-      r: row.requests,
-    })
+  for (const row of getMimoBill()?.rows ?? []) {
+    merged.set(`${row.d}|${row.m}|${row.k}|${row.a ?? ''}`, row)
+  }
+  let fetched = 0
+  let monthsReport: Array<{ year: number; month: number; rows: number; cost: number }> = []
+  const errors: string[] = []
+  let anyOk = false
+  for (const sess of sessions) {
+    const result = await fetchMimoBills({ cookie: sess.cookie, months })
+    if (!result.ok) {
+      // 单个账号失败不毁整表：其他账号照常导入，最后如实汇报。
+      errors.push(result.error ?? `账号 ${sess.accountId} 导入失败`)
+      continue
+    }
+    anyOk = true
+    fetched += result.rows.length
+    if (result.months.length > monthsReport.length) monthsReport = result.months
+    for (const row of result.rows) {
+      merged.set(`${row.date}|${row.model}|${row.apiKey}|${sess.accountId}`, {
+        d: row.date,
+        m: row.model,
+        k: row.apiKey,
+        c: row.cost,
+        t: row.totalToken,
+        r: row.requests,
+        a: sess.accountId,
+      })
+    }
+  }
+  if (!anyOk) {
+    const needLogin = errors.some((e) => e.includes('登录已过期') || e.includes('登录态'))
+    return { ok: false, needLogin, error: errors.join('；') || '导入失败' }
   }
   const rows = [...merged.values()].sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0))
   saveMimoBill({ importedAt: Date.now(), rows })
   return {
     ok: true,
-    fetched: result.rows.length,
-    months: result.months,
+    fetched,
+    months: monthsReport,
     importedAt: Date.now(),
+    ...(errors.length > 0 ? { partial: true, error: errors.join('；') } : {}),
     ...summarizeMimoBill(rows),
   }
 })

@@ -171,6 +171,8 @@ export interface StoredMimoBillRow {
   t: number
   /** 请求数 */
   r: number
+  /** 控制台账号 userId；老数据没有此字段，视为未知账号 */
+  a?: string
 }
 
 export interface StoredMimoBill {
